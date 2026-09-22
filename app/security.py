@@ -7,7 +7,7 @@ Google, via get_current_user.
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 from jose import JWTError, jwt
@@ -15,7 +15,7 @@ from jose import JWTError, jwt
 from app.config import settings
 from app.db import users_collection
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/google", auto_error=True)
+bearer_scheme = HTTPBearer(auto_error=True)
 
 
 def verify_google_id_token(token: str) -> dict:
@@ -50,8 +50,10 @@ def decode_access_token(token: str) -> str:
     return user_id
 
 
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
-    user_id = decode_access_token(token)
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+) -> dict:
+    user_id = decode_access_token(credentials.credentials)
     user = await users_collection().find_one({"_id": user_id})
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
