@@ -1,3 +1,23 @@
+// ============================================================================
+// RETIRED / DEAD CODE -- kept only for reference during the redesign.
+//
+// This was a second, independent implementation of the same Vimshottari
+// dasha algorithm as app/engines/vedic.py (Python). It duplicated the
+// scoring logic exactly and hand-parsed astro_rules.json with manual
+// string splitting instead of a JSON library, which breaks silently on
+// nested values or commas inside names. It was already unreachable from
+// any real entry point (only its own main()).
+//
+// The Python engine (app/engines/vedic.py) is now the single source of
+// truth for this logic, and it now also does what this file never did:
+// birth-time rectification (searching candidate times x ayanamsas
+// against reported life events, not just scoring one fixed chart) and a
+// corrected set of ayanamsa constants. See the design doc's "Astrology
+// engine redesign" section.
+//
+// Do not build on this file -- it is not wired into the running service.
+// ============================================================================
+
 package com.astro.engine;
 
 import java.io.BufferedReader;
