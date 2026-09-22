@@ -1,0 +1,64 @@
+{
+  "GRADUATION": [
+    "Mercury",
+    "Jupiter",
+    "Sun",
+    "Moon"
+  ],
+  "MARRIAGE": [
+    "Venus",
+    "Mars",
+    "Saturn",
+    "Moon",
+    "Jupiter"
+  ],
+  "FIRST_CHILD": [
+    "Jupiter",
+    "Mars",
+    "Moon",
+    "Sun"
+  ],
+  "KIDS": [
+    "Jupiter",
+    "Mars",
+    "Moon",
+    "Sun"
+  ],
+  "CAREER_DISRUPTION": [
+    "Mercury",
+    "Rahu",
+    "Ketu",
+    "Mars",
+    "Saturn"
+  ],
+  "PROPERTY_PURCHASE": [
+    "Mars",
+    "Venus",
+    "Jupiter",
+    "Saturn"
+  ],
+  "FOREIGN_TRAVEL": [
+    "Rahu",
+    "Saturn",
+    "Mercury",
+    "Jupiter"
+  ],
+  "MAJOR_ACCIDENT": [
+    "Mars",
+    "Saturn",
+    "Rahu",
+    "Ketu"
+  ],
+  "BUSINESS_LAUNCH": [
+    "Mercury",
+    "Sun",
+    "Jupiter",
+    "Mars"
+  ],
+  "JOB_PROMOTION": [
+    "Sun",
+    "Mars",
+    "Jupiter",
+    "Saturn"
+  ]
+}
