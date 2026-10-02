@@ -131,7 +131,13 @@ def score_timeline_against_events(
                 break
 
         valid_indicators = significator_matrix.get(ev["category"], [])
-        is_match = active_md in valid_indicators or active_bh in valid_indicators
+        # Requiring BOTH the mahadasha and bhukti lord to be a significator
+        # (not either/or) matters a lot here: each category's significator
+        # list covers roughly half the 9 planets, so an "either" match lets
+        # essentially any candidate -- including wrong ones -- match most
+        # events by pure chance, which made rectification unable to ever
+        # converge (see design doc: "Life-event calibration" section).
+        is_match = active_md in valid_indicators and active_bh in valid_indicators
         earned = weight if is_match else 0.0
         earned_sum += earned
 
@@ -194,16 +200,20 @@ def rectify_birth_time(
 # generating disambiguation questions. Extend this alongside astro_rules.json
 # as new categories are added.
 CATEGORY_QUESTIONS = {
-    "GRADUATION": "When did you complete your degree (graduation date)?",
+    "SCHOOL_GRADUATION": "When did you finish school (10th/12th grade or equivalent)?",
+    "UNDERGRAD_GRADUATION": "When did you complete your undergraduate degree?",
+    "POSTGRADUATE": "When did you complete a postgraduate/master's degree?",
+    "PHD": "When did you complete your PhD or doctorate?",
     "MARRIAGE": "What was your marriage date?",
     "FIRST_CHILD": "What was your first child's birth date?",
     "KIDS": "What was another child's birth date?",
     "CAREER_DISRUPTION": "When did you last change jobs unexpectedly or face a career setback?",
-    "PROPERTY_PURCHASE": "When did you buy your first property?",
+    "PROPERTY_PURCHASE": "When did you buy a property?",
     "FOREIGN_TRAVEL": "When did you first travel abroad?",
     "MAJOR_ACCIDENT": "Have you had a major accident or health event? When?",
     "BUSINESS_LAUNCH": "When did you start a business, if ever?",
     "JOB_PROMOTION": "When did you last get a significant promotion?",
+    "OTHER": "Tell us about another meaningful life event -- when did it happen?",
 }
 
 

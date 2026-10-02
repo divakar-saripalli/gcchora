@@ -12,7 +12,12 @@ router = APIRouter(tags=["me"])
 
 @router.get("/me")
 async def get_me(user: dict = Depends(get_current_user)):
-    profiles = await birth_profiles_collection().find({"userId": user["_id"]}).to_list(length=20)
+    # Explicit sort so "the active profile" (mobile_app/lib/providers/
+    # app_provider.dart AppDataProvider.loadFromMe takes profiles.first)
+    # deterministically means "oldest profile", not whatever order an
+    # unsorted find() happens to return -- which Mongo does not guarantee
+    # is insertion order.
+    profiles = await birth_profiles_collection().find({"userId": user["_id"]}).sort("createdAt", 1).to_list(length=20)
     last_conversation = await conversations_collection().find_one(
         {"userId": user["_id"]}, sort=[("lastMessageAt", -1)]
     )

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter
 
 from app.db import users_collection
+from app.quota import default_usage
 from app.models import GoogleLoginRequest, LoginResponse
 from app.security import create_access_token, verify_google_id_token
 
@@ -34,7 +35,7 @@ async def login_with_google(payload: GoogleLoginRequest):
             "createdAt": datetime.now(timezone.utc),
             "lastLoginAt": datetime.now(timezone.utc),
             "preferences": {},
-            "usage": {"free_questions_remaining": None, "daily_question_used_on": None, "ad_unlock_credits": 0},
+            "usage": default_usage(),
         })
 
     token = create_access_token(user_id)

@@ -42,7 +42,23 @@ class BirthProfileCreate(BaseModel):
 
 class BirthProfileOut(BirthProfileCreate):
     id: str
-    calibration_status: Literal["uncalibrated", "pending_questions", "calibrated"] = "uncalibrated"
+    calibration_status: Literal[
+        "uncalibrated", "pending_review", "calibrated", "locked"
+    ] = "uncalibrated"
+
+
+class BirthProfileUpdate(BaseModel):
+    """All fields optional -- only the ones the client sends are changed.
+    Editing birth_date/birth_time_24h/geographic_coordinates invalidates
+    any existing calibration (it was computed against the old values), so
+    app.routers.profiles.update_profile resets it; the profile's recorded
+    life events are untouched either way, since they're facts about the
+    person's life, not the chart calculation."""
+    label: Optional[str] = None
+    birth_date: Optional[str] = None
+    birth_time_24h: Optional[str] = None
+    geographic_coordinates: Optional[GeoCoordinates] = None
+    birth_time_uncertainty_minutes: Optional[int] = None
 
 
 # ---- Life events ----
@@ -51,6 +67,29 @@ class LifeEventIn(BaseModel):
     category: str
     exact_date: str  # YYYY-MM-DD
     impact_weight_score: float = 1.0
+    # Free-text detail -- required in spirit (not enforced) for category
+    # "OTHER", optional elsewhere, e.g. "Bought the Jubilee Hills flat".
+    notes: Optional[str] = None
+
+
+class LifeEventOut(LifeEventIn):
+    id: str
+
+
+class LifeEventUpdate(BaseModel):
+    category: Optional[str] = None
+    exact_date: Optional[str] = None
+    impact_weight_score: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class LifeEventAddedResponse(BaseModel):
+    id: str
+    # True when adding this event pushed a locked profile's
+    # events-since-last-check counter over the threshold and triggered an
+    # automatic re-evaluation as a side effect of this call. See
+    # app.routers.rectify.EVENTS_SINCE_LOCK_CHECK_THRESHOLD.
+    auto_rectify_triggered: bool = False
 
 
 # ---- Rectification ----
@@ -58,28 +97,84 @@ class LifeEventIn(BaseModel):
 class RectifyRequest(BaseModel):
     # Optionally override the profile's default search window for this run.
     time_window_minutes: Optional[int] = None
-    step_minutes: int = 2
-    ayanamsas: Optional[list[str]] = None  # defaults to the full curated set
 
 
 class DisambiguationQuestion(BaseModel):
     category: str
     question_text: str
+    # The LLM's best plain-language guess at when an event like this would
+    # plausibly fall, if one of the candidate birth times/ayanamsas is
+    # correct (e.g. "sometime between 2012 and 2015") -- based on where
+    # the candidates' implied dasha/bhukti periods actually differ. Lets
+    # the user rate how much it resonates instead of having to recall an
+    # exact date. Empty string if the model couldn't narrow it down.
+    time_frame_hint: str = ""
+
+
+class AyanamsaEstimate(BaseModel):
+    ayanamsa: str
+    rectified_birth_time_24h: str
+    confidence_score: float
+
+
+class RectifyCandidate(BaseModel):
+    """One provider's full opinion: its estimate for every curated
+    ayanamsa (see app.ayanamsas.CURATED_AYANAMSAS), plus whichever of
+    those it considers its own best guess."""
+    provider: str
+    ayanamsa_results: list[AyanamsaEstimate]
+    best_ayanamsa: str
+    best_rectified_birth_time_24h: str
+    best_confidence_score: float
+    reasoning: str
+    suggested_followups: list[DisambiguationQuestion] = Field(default_factory=list)
 
 
 class RectifyResult(BaseModel):
-    status: Literal["calibrated", "pending_questions"]
+    status: Literal["pending_review", "calibrated", "locked"]
+    # Populated when status is "pending_review" (candidates to compare) or
+    # right after a fresh "locked" result (the single winning candidate).
+    # Left empty on a routine locked-mode recheck that just confirms an
+    # existing lock, to keep that response small.
+    candidates: list[RectifyCandidate] = Field(default_factory=list)
+    agreement: Optional[Literal["agree", "disagree"]] = None
+    chosen_provider: Optional[str] = None
     chosen_ayanamsa: Optional[str] = None
     rectified_birth_time_24h: Optional[str] = None
     confidence_score: Optional[float] = None
-    candidates_considered: int
-    pending_questions: list[DisambiguationQuestion] = Field(default_factory=list)
+    events_considered: int
+    # A short, honest, human-readable summary of the result -- meant to be
+    # shown to the user more or less verbatim.
+    message: str
+    # Union of the candidates' suggested categories -- optional ways to
+    # sharpen the estimate further, or to help break a tie between
+    # disagreeing candidates. Never required.
+    suggested_followups: list[DisambiguationQuestion] = Field(default_factory=list)
+
+
+class RectifyCandidateRating(BaseModel):
+    provider: str
+    score: int = Field(ge=1, le=5)
+
+
+class RectifyScoreRequest(BaseModel):
+    ratings: list[RectifyCandidateRating]
 
 
 class RectifyAnswer(BaseModel):
+    """Answer to one suggested_followups question. Deliberately doesn't
+    require an exact date -- the question is now framed as "did something
+    like this happen around <time_frame_hint>?", rated 1 (not at all) to
+    5 (very much), rather than asking the user to log a precisely-dated
+    event. exact_date stays available for anyone who does know it."""
     category: str
-    exact_date: str
-    impact_weight_score: float = 1.0
+    occurred_score: int = Field(ge=1, le=5, default=3)
+    exact_date: str | None = None
+    # Echoed back from the DisambiguationQuestion that was answered, so
+    # the life-event listing has something to show when exact_date is
+    # left blank (see app.routers.rectify._format_events).
+    time_frame_hint: str | None = None
+    notes: str | None = None
 
 
 # ---- Chat ----

@@ -48,3 +48,7 @@ def significator_rules_collection():
 
 def ad_reward_events_collection():
     return get_db()["ad_reward_events"]
+
+
+def rectification_ratings_collection():
+    return get_db()["rectification_ratings"]
