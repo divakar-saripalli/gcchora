@@ -344,3 +344,58 @@ rectify_screen.dart's copy to read naturally for a single candidate
 rate" / "Confirm my pick"). mobile_app/lib/models.dart,
 mobile_app/lib/screens/rectify_screen.dart.
 **Status:** DONE
+
+### 23. "Add an event" dialog: right-side overflow (yellow/black stripe)
+**Type:** Defect
+**Observed:** Opening the "Add an event" dialog (the FAB added in #19)
+showed Flutter's "RIGHT OVERFLOWED BY 45 PIXELS" indicator down the
+dialog's right edge, with "School graduation" selected in the event-type
+dropdown.
+**Root cause:** `DropdownButtonFormField` in life_events_screen.dart's
+`_openAddEventDialog` had no `isExpanded: true`. Without it, Flutter
+sizes the dropdown's selected-value row to its own intrinsic (unbounded)
+width rather than the width actually available inside the dialog, so any
+category label wider than the dialog -- several of kLifeEventCategories'
+labels are, e.g. "Postgraduate / master's degree", "Career disruption /
+job loss" -- overflows past the edge. Classic DropdownButton gotcha,
+unrelated to which item happened to be selected when it was noticed.
+**Fix:** Added `isExpanded: true` to the DropdownButtonFormField, plus
+`overflow: TextOverflow.ellipsis` on each DropdownMenuItem's Text as a
+second line of defense. mobile_app/lib/screens/life_events_screen.dart.
+**Status:** DONE
+
+### 24. Birth-time timezone offset trusted from manual entry, no DST handling
+**Type:** Defect
+**Observed:** Raised as a question ("is the local time correctly
+converted using the right UTC offset?") that turned up a real gap --
+`timezone_offset_hours` was a plain manually-typed field in
+profile_setup_screen.dart (`_tzController`, defaulting to '5.5'),
+completely disconnected from the auto-geocoded latitude/longitude.
+**Root cause:** No timezone lookup existed at all. The field relied on
+the person typing the correct offset from memory, with no historical
+daylight-saving handling -- e.g. a July 1990 New York birth needs -4
+(EDT), not the "standard" -5 (EST) most people would type. A wrong
+offset silently shifts the derived UTC birth instant, which shifts the
+Ascendant and house cusps -- exactly the kind of error rectification is
+meant to correct for, except upstream and invisible.
+**Fix:** Added app/timezone_lookup.py (`compute_timezone_offset_hours`),
+using `timezonefinder` (lat/lng -> IANA tz name) + stdlib `zoneinfo`
+(full historical DST-aware offset for a specific date), both fully
+offline/free. Wired into app/routers/profiles.py so both create_profile
+and update_profile always recompute and override the offset server-side
+from the final lat/lng + birth_date + birth_time_24h, ignoring whatever
+a client sends; update_profile recomputes against the *merged*
+post-update values so changing just the birth date, for example, still
+correctly re-derives DST status. Verified against real historical dates
+(NYC July 1990 -> -4.0, NYC Jan 1990 -> -5.0, India -> always +5.5) and
+via a fake-DB end-to-end test of create+update. Added
+scripts/fix_timezone_offsets.py to backfill existing profiles (same
+pattern as scripts/seed_rules.py) -- needs to be run once against the
+real database (can't be run from this sandbox, no network route to
+Atlas): `python -m scripts.fix_timezone_offsets`. Also removed the now-
+pointless manual timezone field from profile_setup_screen.dart's UI,
+replaced with a note that it's computed automatically.
+app/timezone_lookup.py, app/routers/profiles.py, requirements.txt,
+scripts/fix_timezone_offsets.py, mobile_app/lib/screens/profile_setup_screen.dart.
+**Status:** DONE (backend + mobile UI); backfill script needs to be run
+by Divakar against the real database.

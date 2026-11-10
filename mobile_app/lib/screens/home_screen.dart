@@ -75,6 +75,72 @@ class _HomeScreenState extends State<HomeScreen> {
               tooltip: 'Switch profile',
               onPressed: () => _pickProfile(context, data),
             ),
+          // Dev/QA-only: triggers the backend's /me/test-push (gated by
+          // ENABLE_PUSH_NOTIFICATIONS=true, same pattern as the test-credit
+          // button on the chat screen) so the whole push chain -- token
+          // registration, FCM, device delivery -- can be checked without
+          // needing curl/Postman. Remove once a real feature sends pushes.
+          IconButton(
+            icon: const Icon(Icons.notifications_active_outlined),
+            tooltip: 'Send test push (dev)',
+            onPressed: () async {
+              final messenger = ScaffoldMessenger.of(context);
+              try {
+                final result = await auth.api.requestTestPush();
+                final status = result['status'] as String?;
+                final message = status == 'sent'
+                    ? 'Test push sent to ${result['devices_notified']} device(s) -- check the system tray.'
+                    : (result['note'] as String? ?? 'Push request completed: $status');
+                messenger.showSnackBar(SnackBar(content: Text(message)));
+              } catch (e) {
+                messenger.showSnackBar(SnackBar(content: Text('Test push failed: $e')));
+              }
+            },
+          ),
+          // Dev/QA-only: shows the signed-in user's current question-quota
+          // state (app/quota.py), since nothing else in the app surfaces
+          // it -- the only other way to see it today is to wait for a 402.
+          IconButton(
+            icon: const Icon(Icons.query_stats_outlined),
+            tooltip: 'Check usage (dev)',
+            onPressed: () async {
+              final messenger = ScaffoldMessenger.of(context);
+              try {
+                final usage = await auth.api.getUsage();
+                final free = usage['free_questions_remaining'];
+                final dailyUsed = usage['daily_question_used_today'] == true;
+                final credits = usage['ad_unlock_credits'];
+                if (!context.mounted) return;
+                showDialog<void>(
+                  context: context,
+                  builder: (_) => AlertDialog(
+                    title: const Text('Question quota'),
+                    content: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Free questions remaining (lifetime pool): $free'),
+                        const SizedBox(height: 8),
+                        Text(dailyUsed
+                            ? "Today's free question: already used"
+                            : "Today's free question: still available"),
+                        const SizedBox(height: 8),
+                        Text('Ad-unlock credits banked: $credits'),
+                      ],
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.of(context).pop(),
+                        child: const Text('Close'),
+                      ),
+                    ],
+                  ),
+                );
+              } catch (e) {
+                messenger.showSnackBar(SnackBar(content: Text('Could not check usage: $e')));
+              }
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Sign out',

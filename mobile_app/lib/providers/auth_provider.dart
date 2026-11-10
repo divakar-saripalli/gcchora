@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import '../services/api_client.dart';
 import '../services/auth_service.dart';
+import '../services/push_service.dart';
 import '../models.dart';
 
 enum AuthStatus { unknown, signedOut, signedIn }
@@ -8,9 +9,10 @@ enum AuthStatus { unknown, signedOut, signedIn }
 /// Owns the signed-in session: Google Sign-In -> backend JWT -> /me.
 class AuthProvider extends ChangeNotifier {
   final ApiClient api;
+  final PushService push;
   final AuthService authService = AuthService();
 
-  AuthProvider(this.api);
+  AuthProvider(this.api, this.push);
 
   AuthStatus status = AuthStatus.unknown;
   AppUser? currentUser;
@@ -31,6 +33,10 @@ class AuthProvider extends ChangeNotifier {
       final me = await api.getMe();
       currentUser = AppUser.fromJson(me['user'] as Map<String, dynamic>);
       status = AuthStatus.signedIn;
+      // Fire-and-forget: registering the device's push token (and the
+      // permission prompt it may trigger) should never delay getting the
+      // user past the splash screen.
+      push.registerForSignedInUser();
     } catch (_) {
       await authService.clearSession();
       api.setToken(null);
@@ -62,6 +68,8 @@ class AuthProvider extends ChangeNotifier {
       status = AuthStatus.signedIn;
       isLoading = false;
       notifyListeners();
+      // Fire-and-forget, same reasoning as tryRestoreSession above.
+      push.registerForSignedInUser();
       return true;
     } catch (e) {
       errorMessage = 'Sign-in failed: $e';

@@ -21,6 +21,12 @@ plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
     id("com.android.application") version "9.1.0" apply false
     id("org.jetbrains.kotlin.android") version "2.4.0" apply false
+    // Google services Gradle plugin -- makes google-services.json's config
+    // (project number, API key, etc.) available to the Firebase SDKs.
+    // Declared here (not applied) and applied per-module in app/build.gradle.kts,
+    // which is the standard "plugins {} apply false" pattern Firebase's own
+    // setup wizard uses for the Kotlin DSL.
+    id("com.google.gms.google-services") version "4.5.0" apply false
 }
 
 include(":app")

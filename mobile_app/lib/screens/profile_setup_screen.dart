@@ -236,13 +236,22 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
               ),
             ],
             const SizedBox(height: 16),
-            TextFormField(
-              controller: _tzController,
-              decoration:
-                  const InputDecoration(labelText: 'Timezone offset from UTC (e.g. 5.5 for IST)'),
-              keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
-              validator: (v) =>
-                  (v == null || double.tryParse(v) == null) ? 'Required, e.g. 5.5' : null,
+            // No manual timezone-offset field anymore -- the backend
+            // derives the correct, DST-aware UTC offset itself from the
+            // coordinates + birth date/time (see app/timezone_lookup.py).
+            // A manually-typed offset couldn't account for whether
+            // daylight saving was in effect on the actual birth date
+            // (e.g. a July US birth needs a different offset than a
+            // January one at the same place), so this was silently
+            // producing wrong chart calculations for anyone who typed
+            // the "standard" offset from memory. _tzController is kept,
+            // unused-by-the-user, purely because GeoCoordinates still
+            // requires a value in the request body -- the backend
+            // overwrites whatever it is.
+            Text(
+              'Timezone is figured out automatically from the birth place and date '
+              '(including daylight saving, for the actual birth date).',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey[600]),
             ),
             const SizedBox(height: 8),
             TextFormField(

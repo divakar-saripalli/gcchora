@@ -54,3 +54,25 @@ built):
   shell), so it needs to be built defensively (never breaks chat if
   caching isn't usable) and verified against the real Gemini API once
   implemented.
+
+## 3. Pre-LLM request router/classifier (e.g. Jev)
+Raised third, while investigating a 402 (our own app-quota exhaustion,
+unrelated to Gemini billing -- see DefectBacklog for that thread) led into
+a tangent about "Jev" (Jev Router, by TypeSafe AI, trending ~Sept 2026).
+It's a small, fast classifier that sits in front of the real LLM call and
+judges prompt difficulty (simple/medium/complex/reasoning), routing to an
+appropriately-sized model instead of always hitting the expensive one --
+shipped via LiteLLM's "Auto Router" or standalone on OpenRouter. It is
+NOT a cache (doesn't store/replay answers, unlike idea #2 above) and
+despite how it was initially described to Claude, it doesn't appear to
+do anything with the user's emotional tone -- that was a loose
+description of its difficulty-judging, not a real capability. Pricing is
+usage-based per classification call, no flat subscription found.
+
+Explicitly deferred: at this app's current scale (live testing, a
+handful of users), the savings wouldn't be meaningful yet, and it adds a
+dependency on another vendor (OpenRouter/TypeSafe) on top of
+Gemini+GPT+Firebase+MongoDB Atlas already in play. Worth revisiting if
+and when real usage volume makes LLM cost an actual line item -- at that
+point, compare against just routing cheap/simple chat questions to
+Gemini Flash-tier directly (no extra vendor) before reaching for this.

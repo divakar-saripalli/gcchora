@@ -12,3 +12,5 @@ atlas-credentials.env
 PSOutput.txt
 mobile_app/Secrets/
 mobile_app/client_secret_*.json
+firebase-service-account.json
+*firebase-adminsdk*.json

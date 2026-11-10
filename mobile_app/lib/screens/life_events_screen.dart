@@ -115,9 +115,17 @@ class _LifeEventsScreenState extends State<LifeEventsScreen> {
               children: [
                 DropdownButtonFormField<String>(
                   value: _category,
+                  // Without this, a long label (e.g. "Postgraduate /
+                  // master's degree") sizes the dropdown to its own
+                  // intrinsic width instead of the dialog's available
+                  // width, overflowing past the dialog's edge.
+                  isExpanded: true,
                   decoration: const InputDecoration(labelText: 'Event type'),
                   items: kLifeEventCategories.entries
-                      .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value.label)))
+                      .map((e) => DropdownMenuItem(
+                            value: e.key,
+                            child: Text(e.value.label, overflow: TextOverflow.ellipsis),
+                          ))
                       .toList(),
                   onChanged: (v) => setDialogState(() => _category = v!),
                 ),

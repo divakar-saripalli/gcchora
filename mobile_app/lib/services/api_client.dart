@@ -26,6 +26,7 @@ class ApiClient {
   String? _token;
 
   void setToken(String? token) => _token = token;
+  bool get hasToken => _token != null;
 
   Map<String, String> get _headers => {
         'Content-Type': 'application/json',
@@ -214,6 +215,38 @@ class ApiClient {
     final resp = await http.post(_u('/conversations/$conversationId/messages'),
         headers: _headers, body: jsonEncode({'content': content}));
     return ChatMessage.fromJson(_decode(resp) as Map<String, dynamic>);
+  }
+
+  // ---- Push notifications ----
+
+  /// Registers (or re-registers) this device's FCM token against the
+  /// signed-in user -- see app/routers/me.py:register_device_token.
+  /// Best-effort by design (callers swallow failures); worst case the
+  /// backend just doesn't have a current token for this device until the
+  /// next successful call.
+  Future<void> registerDeviceToken(String token, {required String platform}) async {
+    final resp = await http.post(_u('/me/device-token'),
+        headers: _headers, body: jsonEncode({'token': token, 'platform': platform}));
+    _decode(resp);
+  }
+
+  /// Dev/QA-only: triggers the backend's /me/test-push, same gating
+  /// pattern as requestTestAdCredit (ENABLE_PUSH_NOTIFICATIONS must be
+  /// true server-side). Returns the backend's status payload so the UI
+  /// can show *why* nothing arrived (e.g. "no_devices_or_unconfigured")
+  /// rather than just "it worked" / "it didn't".
+  Future<Map<String, dynamic>> requestTestPush() async {
+    final resp = await http.post(_u('/me/test-push'), headers: _headers);
+    return _decode(resp) as Map<String, dynamic>;
+  }
+
+  /// Dev/QA-only: reads the signed-in user's question-quota state
+  /// (app/quota.py keeps this server-side only -- nothing else exposes
+  /// it) so "why did I just get a 402" can be checked directly instead
+  /// of guessing or querying Mongo.
+  Future<Map<String, dynamic>> getUsage() async {
+    final resp = await http.get(_u('/me/usage'), headers: _headers);
+    return _decode(resp) as Map<String, dynamic>;
   }
 
   // ---- Ads ----

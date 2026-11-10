@@ -52,3 +52,7 @@ def ad_reward_events_collection():
 
 def rectification_ratings_collection():
     return get_db()["rectification_ratings"]
+
+
+def device_tokens_collection():
+    return get_db()["device_tokens"]

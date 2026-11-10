@@ -14,6 +14,7 @@ from app.models import (
     LifeEventUpdate,
 )
 from app.security import get_current_user
+from app.timezone_lookup import compute_timezone_offset_hours
 
 router = APIRouter(prefix="/profiles", tags=["profiles"])
 
@@ -21,19 +22,33 @@ router = APIRouter(prefix="/profiles", tags=["profiles"])
 @router.post("", response_model=BirthProfileOut)
 async def create_profile(payload: BirthProfileCreate, user: dict = Depends(get_current_user)):
     profile_id = str(uuid.uuid4())
+    coordinates = payload.geographic_coordinates.model_dump()
+    # Always derive the real, DST-aware UTC offset from the geocoded
+    # location + birth date/time server-side -- never trust whatever the
+    # client sent (a manually-typed field with no way to know historical
+    # DST rules). Falls back to the client-supplied value only if lookup
+    # genuinely fails (e.g. coordinates over open ocean), so profile
+    # creation is never blocked by this. See app.timezone_lookup.
+    computed_offset = compute_timezone_offset_hours(
+        coordinates["latitude"], coordinates["longitude"], payload.birth_date, payload.birth_time_24h
+    )
+    if computed_offset is not None:
+        coordinates["timezone_offset_hours"] = computed_offset
     doc = {
         "_id": profile_id,
         "userId": user["_id"],
         "label": payload.label,
         "birth_date": payload.birth_date,
         "birth_time_24h": payload.birth_time_24h,
-        "geographic_coordinates": payload.geographic_coordinates.model_dump(),
+        "geographic_coordinates": coordinates,
         "birth_time_uncertainty_minutes": payload.birth_time_uncertainty_minutes,
         "calibration": {"status": "uncalibrated"},
         "createdAt": datetime.now(timezone.utc),
     }
     await birth_profiles_collection().insert_one(doc)
-    return BirthProfileOut(id=profile_id, **payload.model_dump(), calibration_status="uncalibrated")
+    out_payload = payload.model_dump()
+    out_payload["geographic_coordinates"] = coordinates
+    return BirthProfileOut(id=profile_id, **out_payload, calibration_status="uncalibrated")
 
 
 @router.get("/{profile_id}")
@@ -60,6 +75,24 @@ async def update_profile(profile_id: str, payload: BirthProfileUpdate, user: dic
 
     chart_affecting = {"birth_date", "birth_time_24h", "geographic_coordinates"}
     changed_chart_fields = any(field in updates and updates[field] != profile.get(field) for field in chart_affecting)
+
+    # Any chart-affecting field changing means the UTC offset needs
+    # recomputing against the *final* (post-merge) date/time/location --
+    # not just whichever one field this particular PATCH happened to
+    # touch. Same reasoning and fallback behavior as create_profile; see
+    # app.timezone_lookup.
+    if changed_chart_fields:
+        merged_coords = updates.get("geographic_coordinates", profile.get("geographic_coordinates", {}))
+        merged_date = updates.get("birth_date", profile.get("birth_date"))
+        merged_time = updates.get("birth_time_24h", profile.get("birth_time_24h"))
+        if merged_coords.get("latitude") is not None and merged_coords.get("longitude") is not None:
+            computed_offset = compute_timezone_offset_hours(
+                merged_coords["latitude"], merged_coords["longitude"], merged_date, merged_time
+            )
+            if computed_offset is not None:
+                merged_coords = dict(merged_coords)
+                merged_coords["timezone_offset_hours"] = computed_offset
+                updates["geographic_coordinates"] = merged_coords
 
     if updates:
         await birth_profiles_collection().update_one({"_id": profile_id}, {"$set": updates})

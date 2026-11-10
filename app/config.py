@@ -40,5 +40,16 @@ class Settings:
     log_llm_prompts: bool = os.getenv("LOG_LLM_PROMPTS", "true").lower() == "true"
     llm_prompt_log_path: str = os.getenv("LLM_PROMPT_LOG_PATH", "logs/llm_prompts.log")
 
+    # Push notifications (Firebase Cloud Messaging). Off by default so a
+    # fresh checkout without the credentials file still runs normally --
+    # app.push.send_push() just logs and no-ops when this is False, same
+    # pattern as allow_test_ad_bypass above. The credentials file is the
+    # *service account* key (Project settings -> Service accounts ->
+    # Generate new private key), not google-services.json -- that one's
+    # for the Flutter app, this one's for the server to send pushes.
+    # Never commit it: see .gitignore (firebase-service-account.json).
+    enable_push_notifications: bool = os.getenv("ENABLE_PUSH_NOTIFICATIONS", "false").lower() == "true"
+    firebase_credentials_path: str = os.getenv("FIREBASE_CREDENTIALS_PATH", "firebase-service-account.json")
+
 
 settings = Settings()

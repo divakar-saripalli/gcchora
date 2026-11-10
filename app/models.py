@@ -207,3 +207,10 @@ class AdRewardCallback(BaseModel):
     ad_network: str
     reward_token: str
     signature: str
+
+
+# ---- Push notifications ----
+
+class DeviceTokenRegistration(BaseModel):
+    token: str
+    platform: Literal["android", "ios"]
