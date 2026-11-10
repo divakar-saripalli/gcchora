@@ -23,7 +23,6 @@ from app.security import get_current_user
 router = APIRouter(prefix="/ads", tags=["ads"])
 
 
-
 def _verify_signature(payload: AdRewardCallback) -> bool:
     if not settings.ad_ssv_shared_secret:
         return False  # refuse to credit anything until real verification is configured
