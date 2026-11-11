@@ -178,9 +178,14 @@ async def list_life_events(profile_id: str, user: dict = Depends(get_current_use
         LifeEventOut(
             id=e["_id"],
             category=e["category"],
-            exact_date=e["exact_date"],
+            # .get(), not e["exact_date"]: events created from answering a
+            # rectify suggested_followups question are stored with
+            # exact_date=None (see app.routers.rectify.add_followup_and_rectify).
+            exact_date=e.get("exact_date"),
             impact_weight_score=e.get("impact_weight_score", 1.0),
             notes=e.get("notes"),
+            time_frame_hint=e.get("time_frame_hint"),
+            source=e.get("source"),
         )
         for e in events
     ]
@@ -206,9 +211,11 @@ async def update_life_event(
     return LifeEventOut(
         id=existing["_id"],
         category=existing["category"],
-        exact_date=existing["exact_date"],
+        exact_date=existing.get("exact_date"),
         impact_weight_score=existing.get("impact_weight_score", 1.0),
         notes=existing.get("notes"),
+        time_frame_hint=existing.get("time_frame_hint"),
+        source=existing.get("source"),
     )
 
 

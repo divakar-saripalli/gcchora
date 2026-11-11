@@ -119,16 +119,41 @@ def _build_context(profile: dict, events: list[dict]) -> str:
     events_block = ""
     if events:
         event_lines = "\n".join(
-            f"- {e['category']} on {e['exact_date']}" + (f" ({e['notes']})" if e.get("notes") else "")
+            # .get(), not e["exact_date"]: an event created from answering a
+            # rectify follow-up question has no exact date, only a
+            # time_frame_hint (see app.routers.rectify.add_followup_and_rectify
+            # and DefectBacklog #25) -- fall back to that so this reads as
+            # "around 2013-2015" instead of the literal word "None".
+            f"- {e['category']} on {e.get('exact_date') or e.get('time_frame_hint') or 'an unknown date'}"
+            + (f" ({e['notes']})" if e.get("notes") else "")
             for e in events
         )
         events_block = f"\n\nTheir recorded life events, for grounding specific answers:\n{event_lines}"
+
+    # Covers item 2 of Divakar's add-ons request (see FeatureBacklog.md):
+    # the model should transparently handle whatever language, dialect, or
+    # casual/slang phrasing the question arrives in -- including speech-
+    # to-text transcripts from the chat screen's mic button, which are
+    # never perfectly punctuated -- without the user having to ask in
+    # English or in a formal register first.
+    language_line = (
+        " The user may write or speak in any language, regional dialect, or informal/slang "
+        "phrasing (including text transcribed from speech, which may lack punctuation or have "
+        "minor misheard words) -- understand it as best you can regardless, and reply in the "
+        "same language and a similarly casual register the question was asked in, rather than "
+        "defaulting to English or a more formal tone than the user used. If the question mixes "
+        "languages (e.g. code-switching between English and a regional language in the same "
+        "sentence), respond naturally in that same mixed style rather than forcing it into one "
+        "language. Only ask the user to rephrase if the question is genuinely unintelligible, "
+        "not merely informal or in a language other than English."
+    )
 
     return (
         "You are an astrology assistant. "
         + location_line
         + chart_line
         + events_block
+        + language_line
         + " Answer astrology questions grounded in this chart and these events. This is guidance "
         "and entertainment, not medical, legal, or financial advice. Keep answers short and to the "
         "point -- 3 to 5 sentences by default, no long lists or headers, and no restating the "

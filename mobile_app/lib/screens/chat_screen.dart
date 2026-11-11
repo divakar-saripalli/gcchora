@@ -6,6 +6,7 @@ import '../providers/auth_provider.dart';
 import '../providers/app_provider.dart';
 import '../services/api_client.dart';
 import '../models.dart';
+import '../services/speech_service.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -21,6 +22,13 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _loading = true;
   bool _sending = false;
   String? _quotaMessage;
+  final _speech = SpeechService();
+  bool _listening = false;
+  // The text that was already in the box when the mic was tapped --
+  // speech_to_text's recognizedWords is the FULL transcript of the
+  // current listening session, not incremental, so each update replaces
+  // only what's been dictated, leaving anything typed beforehand alone.
+  String _preSpeechText = '';
 
   // Animates a "typing..." bubble at the bottom of the chat while waiting
   // for a reply -- covers the whole round trip including the backend's
@@ -145,9 +153,42 @@ class _ChatScreenState extends State<ChatScreen> {
     if (mounted) setState(() => _sending = false);
   }
 
+  Future<void> _toggleListening() async {
+    if (_listening) {
+      await _speech.stopListening();
+      return; // onDone (set below) flips _listening back off.
+    }
+    final ok = await _speech.ensureReady();
+    if (!ok) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'Microphone access is unavailable or was denied -- check this app\'s '
+                'permission in your phone\'s Settings to use speech input.')));
+      }
+      return;
+    }
+    _preSpeechText = _controller.text;
+    setState(() => _listening = true);
+    await _speech.startListening(
+      onResult: (transcript) {
+        if (!mounted) return;
+        final combined = _preSpeechText.isEmpty ? transcript : '$_preSpeechText $transcript';
+        setState(() {
+          _controller.text = combined;
+          _controller.selection = TextSelection.collapsed(offset: combined.length);
+        });
+      },
+      onDone: () {
+        if (mounted) setState(() => _listening = false);
+      },
+    );
+  }
+
   @override
   void dispose() {
     _typingTimer?.cancel();
+    _speech.cancel();
     _controller.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -234,9 +275,15 @@ class _ChatScreenState extends State<ChatScreen> {
                               await auth.api.requestTestAdCredit();
                               if (!mounted) return;
                               setState(() => _quotaMessage = null);
-                              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                                  content: Text(
-                                      'Test credit added (no real ad watched) -- tap send to try again.')));
+                              // The question that triggered the quota block is
+                              // still sitting in _controller (restored by _send's
+                              // QuotaExceededException handler) -- resend it
+                              // automatically now that credit has been granted,
+                              // instead of making the user tap Send again for a
+                              // question they already asked once.
+                              if (_controller.text.trim().isNotEmpty) {
+                                await _send();
+                              }
                             } catch (e) {
                               if (mounted) {
                                 ScaffoldMessenger.of(context).showSnackBar(
@@ -257,14 +304,29 @@ class _ChatScreenState extends State<ChatScreen> {
                         Expanded(
                           child: TextField(
                             controller: _controller,
-                            decoration: const InputDecoration(
-                              hintText: 'Ask a question...',
-                              border: OutlineInputBorder(),
+                            decoration: InputDecoration(
+                              hintText: _listening ? 'Listening...' : 'Ask a question...',
+                              border: const OutlineInputBorder(),
                             ),
                             onSubmitted: (_) => _send(),
                           ),
                         ),
-                        const SizedBox(width: 8),
+                        const SizedBox(width: 4),
+                        // Tap to start dictating the question by speech instead
+                        // of typing; tap again (or pause) to stop. Whatever
+                        // language the phone's speech recognizer is set to is
+                        // transcribed as-is -- the backend understands the
+                        // question in any language, see SpeechService's doc
+                        // comment.
+                        IconButton(
+                          tooltip: _listening ? 'Stop listening' : 'Ask by speech',
+                          icon: Icon(
+                            _listening ? Icons.mic : Icons.mic_none,
+                            color: _listening ? Theme.of(context).colorScheme.error : null,
+                          ),
+                          onPressed: _sending ? null : _toggleListening,
+                        ),
+                        const SizedBox(width: 4),
                         IconButton.filled(
                           icon: _sending
                               ? const SizedBox(
