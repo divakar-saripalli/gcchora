@@ -19,6 +19,7 @@ dependencies:
   geocoding: ^4.0.0
   firebase_core: ^3.8.0
   firebase_messaging: ^15.1.6
+  speech_to_text: ^7.4.0
 
 dev_dependencies:
   flutter_test:

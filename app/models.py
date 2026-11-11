@@ -74,6 +74,20 @@ class LifeEventIn(BaseModel):
 
 class LifeEventOut(LifeEventIn):
     id: str
+    # Overridden as optional: events created from answering a rectify
+    # suggested_followups question (see
+    # app.routers.rectify.add_followup_and_rectify) deliberately don't
+    # require an exact date -- only a 1-5 "did this happen around
+    # <time_frame_hint>" rating. Keeping LifeEventOut.exact_date
+    # required (inherited as `str`) made FastAPI's response_model
+    # validation raise -- and therefore GET /profiles/{id}/events 500 --
+    # for the WHOLE list the moment any one event like that existed.
+    exact_date: str | None = None
+    # Echoed through so the life-events list has something to display
+    # for an event with no exact_date, and so the UI can tell a
+    # follow-up-question answer apart from a manually logged event.
+    time_frame_hint: str | None = None
+    source: str | None = None
 
 
 class LifeEventUpdate(BaseModel):

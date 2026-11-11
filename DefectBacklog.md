@@ -399,3 +399,74 @@ app/timezone_lookup.py, app/routers/profiles.py, requirements.txt,
 scripts/fix_timezone_offsets.py, mobile_app/lib/screens/profile_setup_screen.dart.
 **Status:** DONE (backend + mobile UI); backfill script needs to be run
 by Divakar against the real database.
+
+### 25. Rectify follow-up answers vanished from the life events list (GET /events 500'd silently)
+**Type:** Bug
+**Observed:** Divakar noticed that answering the follow-up questions
+rectification asks during calibration didn't show up anywhere in the
+"Life events" screen, and asked whether they're stored at all for future
+calibration.
+**Root cause:** They ARE stored -- `add_followup_and_rectify`
+(app/routers/rectify.py) inserts them into `life_events_collection` with
+`source: "suggested_followup_answer"`, and they're fed back into every
+later `/rectify` call exactly like a manually logged event. The bug was
+on the read side: `RectifyAnswer.exact_date` is deliberately optional
+(the follow-up flow only asks the user to rate 1-5 how much something
+like this resonates around a given `time_frame_hint`, not to supply an
+exact date), so these events are stored with `exact_date: None`. But
+`LifeEventOut` inherited `exact_date: str` (required) from `LifeEventIn`,
+so FastAPI's response_model validation raised the moment any single
+event like that existed for a profile -- and because it's a `list[...]`
+response model, that failed the ENTIRE `GET /profiles/{id}/events` call,
+not just that one item. The mobile app's `loadEvents()` catches the
+exception into `errorMessage` but never surfaces it on this screen's
+auto-load, so the user just saw life events silently fail to load/update
+with no visible error. The same bug existed in the `PATCH
+.../events/{event_id}` handler (`existing["exact_date"]`), which would
+have crashed if anyone tapped to edit one of these events.
+**Fix:** `LifeEventOut` now overrides `exact_date` as optional and adds
+`time_frame_hint`/`source` passthrough fields; both the GET list and
+PATCH handlers in app/routers/profiles.py now read `exact_date` with
+`.get()` instead of indexing. Mobile `LifeEvent` model
+(mobile_app/lib/models.dart) made `exactDate` nullable and added
+`timeFrameHint`/`source` + an `isFromFollowUpAnswer` helper. The life
+events list screen (life_events_screen.dart) now shows "Date not given"
++ "Around: <time_frame_hint>" for these entries instead of crashing on
+`DateTime.tryParse(null)`, with a small icon marking them as coming from
+a calibration follow-up answer; tapping one still opens the normal edit
+dialog, letting the user give it a real date if they want to.
+**Files:** app/models.py, app/routers/profiles.py,
+mobile_app/lib/models.dart, mobile_app/lib/screens/life_events_screen.dart.
+**Status:** DONE -- verified by reconstructing the exact
+pydantic-validation failure before the fix and confirming it passes
+after; not yet exercised against the real app/DB by Divakar.
+
+### 26. Calibration follow-up questions sometimes asked about future events
+**Type:** Bug
+**Observed:** Divakar noticed some of the follow-up questions rectification
+poses during calibration had a `time_frame_hint` referring to a date range
+that hadn't happened yet (i.e. in the future relative to today), when the
+whole point is to ask about something the user could actually recall and
+rate.
+**Root cause:** `_build_prompt` (app/routers/rectify.py) never told the
+model what today's actual real-world date is, so when reasoning about
+which dasha/bhukti period to ask about next, it had no anchor to know
+whether a given period was already in the past. For a profile where the
+candidate birth times imply a dasha/bhukti period landing after today, the
+model would still suggest it.
+**Fix:** Two layers. (1) `_build_prompt` now states today's real date
+up front and explicitly instructs the model to only ask about periods
+that could already have happened by then, skipping ahead to an
+already-past period instead if the "interesting" (differentiating)
+dasha/bhukti windows are all still ahead. (2) A defensive backstop in
+`_candidate_from_raw`: `_is_future_only_hint` scans a `time_frame_hint`
+for 4-digit years and drops the suggestion (with a logged warning,
+`_keep_followup_or_log`) if every year mentioned is still ahead of the
+current year, in case a provider ignores the instruction anyway. A hint
+straddling today, or with no year in it at all, is left alone since it
+can't be judged unsafe.
+**Files:** app/routers/rectify.py.
+**Status:** DONE -- verified with a simulated provider response mixing a
+past-dated, a future-dated, and a hint-less follow-up: the future one is
+dropped and logged, the other two pass through. Not yet exercised against
+a real LLM call by Divakar.

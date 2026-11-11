@@ -180,7 +180,11 @@ class _LifeEventsScreenState extends State<LifeEventsScreen> {
   }
 
   Future<void> _openEditDialog(LifeEvent event) async {
-    DateTime editDate = DateTime.tryParse(event.exactDate) ?? DateTime.now();
+    // event.exactDate is null for an event created by answering a
+    // rectify follow-up question (it only has a timeFrameHint + a 1-5
+    // rating) -- default the picker to today and let Save give it a
+    // real date, same as adding a brand-new event.
+    DateTime editDate = DateTime.tryParse(event.exactDate ?? '') ?? DateTime.now();
     final notesController = TextEditingController(text: event.notes ?? '');
     final data = context.read<AppDataProvider>();
 
@@ -318,14 +322,31 @@ class _LifeEventsScreenState extends State<LifeEventsScreen> {
                             )
                           : null,
                     ),
-                    ...entry.value.map((e) => ListTile(
-                          dense: true,
-                          leading: const Icon(Icons.event, size: 20),
-                          title: Text(e.exactDate),
-                          subtitle: (e.notes != null && e.notes!.isNotEmpty) ? Text(e.notes!) : null,
-                          trailing: const Icon(Icons.edit, size: 18),
-                          onTap: data.isBusy ? null : () => _openEditDialog(e),
-                        )),
+                    ...entry.value.map((e) {
+                          // Events created by answering a rectify follow-up
+                          // question (see RectifyAnswer on the backend) have
+                          // no exact date -- show the time-frame hint they
+                          // were asked about instead, plus a chip so it's
+                          // clear this wasn't a manually logged event.
+                          final hasExactDate = e.exactDate != null && e.exactDate!.isNotEmpty;
+                          final subtitleParts = <String>[
+                            if (!hasExactDate && (e.timeFrameHint ?? '').isNotEmpty) 'Around: ${e.timeFrameHint}',
+                            if (e.notes != null && e.notes!.isNotEmpty) e.notes!,
+                          ];
+                          return ListTile(
+                            dense: true,
+                            leading: Icon(hasExactDate ? Icons.event : Icons.help_outline, size: 20),
+                            title: Text(hasExactDate ? e.exactDate! : 'Date not given'),
+                            subtitle: subtitleParts.isNotEmpty ? Text(subtitleParts.join(' • ')) : null,
+                            trailing: e.isFromFollowUpAnswer
+                                ? const Tooltip(
+                                    message: 'From a calibration follow-up question',
+                                    child: Icon(Icons.psychology_outlined, size: 18),
+                                  )
+                                : const Icon(Icons.edit, size: 18),
+                            onTap: data.isBusy ? null : () => _openEditDialog(e),
+                          );
+                        }),
                   ],
                 ),
               );

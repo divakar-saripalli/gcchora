@@ -176,17 +176,28 @@ class BirthProfile {
 class LifeEvent {
   final String? id; // null until the backend has assigned one
   final String category;
-  final String exactDate; // YYYY-MM-DD
+  // Null for an event created by answering a rectify follow-up question
+  // (see RectifyAnswer on the backend) -- those only carry a
+  // [timeFrameHint] and a 1-5 resonance rating, not a precise date.
+  final String? exactDate; // YYYY-MM-DD
   final double impactWeightScore;
   final String? notes;
+  final String? timeFrameHint;
+  // e.g. "suggested_followup_answer" when this came from answering a
+  // rectify follow-up question instead of the "Add an event" form.
+  final String? source;
 
   LifeEvent({
     this.id,
     required this.category,
-    required this.exactDate,
+    this.exactDate,
     this.impactWeightScore = 1.0,
     this.notes,
+    this.timeFrameHint,
+    this.source,
   });
+
+  bool get isFromFollowUpAnswer => source == 'suggested_followup_answer';
 
   LifeEvent copyWith({
     String? id,
@@ -194,6 +205,8 @@ class LifeEvent {
     String? exactDate,
     double? impactWeightScore,
     String? notes,
+    String? timeFrameHint,
+    String? source,
   }) =>
       LifeEvent(
         id: id ?? this.id,
@@ -201,19 +214,23 @@ class LifeEvent {
         exactDate: exactDate ?? this.exactDate,
         impactWeightScore: impactWeightScore ?? this.impactWeightScore,
         notes: notes ?? this.notes,
+        timeFrameHint: timeFrameHint ?? this.timeFrameHint,
+        source: source ?? this.source,
       );
 
   factory LifeEvent.fromJson(Map<String, dynamic> json) => LifeEvent(
         id: json['id'] as String?,
         category: json['category'] as String,
-        exactDate: json['exact_date'] as String,
+        exactDate: json['exact_date'] as String?,
         impactWeightScore: (json['impact_weight_score'] as num?)?.toDouble() ?? 1.0,
         notes: json['notes'] as String?,
+        timeFrameHint: json['time_frame_hint'] as String?,
+        source: json['source'] as String?,
       );
 
   Map<String, dynamic> toJson() => {
         'category': category,
-        'exact_date': exactDate,
+        if (exactDate != null) 'exact_date': exactDate,
         'impact_weight_score': impactWeightScore,
         if (notes != null) 'notes': notes,
       };

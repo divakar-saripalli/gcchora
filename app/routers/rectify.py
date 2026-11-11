@@ -26,6 +26,8 @@ Flow:
      how this also gets triggered automatically after enough new events
      accumulate without the user calling this endpoint themselves.
 """
+import logging
+import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -43,6 +45,8 @@ from app.models import (
     RectifyScoreRequest,
 )
 from app.security import get_current_user
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/profiles", tags=["rectification"])
 
@@ -117,8 +121,12 @@ def _format_history(history: list[dict], limit: int = 3) -> str:
 
 def _build_prompt(profile: dict, events: list[dict], window_minutes: int, history: list[dict]) -> str:
     coords = profile["geographic_coordinates"]
+    today = datetime.now(timezone.utc).date().isoformat()
     return (
         "You are an expert Vedic astrologer performing birth-time rectification. "
+        f"Today's real-world date is {today} -- the user is answering these questions now, "
+        "so every event you ask about must be something that could already have happened by "
+        f"then.\n\n"
         f"The user states they were born on {profile['birth_date']} at {profile['birth_time_24h']} "
         f"(local time), at latitude {coords['latitude']}, longitude {coords['longitude']}, "
         f"timezone offset {coords['timezone_offset_hours']} hours from UTC. They are unsure of the "
@@ -140,7 +148,12 @@ def _build_prompt(profile: dict, events: list[dict], window_minutes: int, histor
         "if one of the candidates above is correct (e.g. \"sometime between 2012 and "
         "2015\"), so the user can rate how much it resonates rather than needing to recall "
         "an exact date. Leave time_frame_hint as an empty string only if you genuinely "
-        "can't narrow it down."
+        f"can't narrow it down. IMPORTANT: this is strictly backward-looking -- only ask about "
+        f"events that would have already happened on or before {today} under the candidate "
+        "times above. Never suggest a question about something that would only happen in the "
+        "future relative to today; if every plausible event for a dasha/bhukti period you'd "
+        "otherwise ask about falls after today, skip that period and pick a different one "
+        "that's already in the past instead."
     )
 
 
@@ -214,6 +227,37 @@ def _recheck_schema() -> dict:
     }
 
 
+_YEAR_RE = re.compile(r"(?<!\d)(\d{4})(?!\d)")
+
+
+def _is_future_only_hint(time_frame_hint: str) -> bool:
+    """Defensive backstop for _build_prompt's "don't ask about the future"
+    instruction, in case a provider ignores it anyway. Pulls every 4-digit
+    year mentioned in the hint (e.g. "sometime between 2012 and 2015") and
+    flags it only when EVERY year mentioned is still ahead of today -- a
+    hint that straddles today (e.g. "between 2024 and 2027" when it's
+    currently 2026) is left alone, since part of that window has already
+    happened. A hint with no year at all (e.g. "around when you started
+    college") can't be checked this way and is left alone too."""
+    years = [int(y) for y in _YEAR_RE.findall(time_frame_hint)]
+    if not years:
+        return False
+    current_year = datetime.now(timezone.utc).year
+    return all(y > current_year for y in years)
+
+
+def _keep_followup_or_log(provider: str, followup: dict) -> bool:
+    hint = followup.get("time_frame_hint") or ""
+    if _is_future_only_hint(hint):
+        logger.warning(
+            "Dropping future-dated rectify follow-up from provider=%s category=%s hint=%r "
+            "(_build_prompt asked it not to do this)",
+            provider, followup.get("category"), hint,
+        )
+        return False
+    return True
+
+
 def _candidate_from_raw(provider: str, raw: dict) -> RectifyCandidate:
     ayanamsa_results = [
         AyanamsaEstimate(
@@ -244,8 +288,14 @@ def _candidate_from_raw(provider: str, raw: dict) -> RectifyCandidate:
                 or f"Can you tell me more about {f['category'].replace('_', ' ').lower()}?",
                 time_frame_hint=f.get("time_frame_hint") or "",
             )
-            for f in raw.get("suggested_followups", [])[:MAX_SUGGESTED_FOLLOWUPS]
-        ],
+            # Backstop against the provider ignoring _build_prompt's
+            # backward-looking-only instruction and suggesting a question
+            # about an event that hasn't happened yet -- filtered BEFORE
+            # the MAX_SUGGESTED_FOLLOWUPS slice so a dropped future-dated
+            # one doesn't crowd out a good, usable suggestion behind it.
+            for f in raw.get("suggested_followups", [])
+            if _keep_followup_or_log(provider, f)
+        ][:MAX_SUGGESTED_FOLLOWUPS],
     )
 
 
