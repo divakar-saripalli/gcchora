@@ -29,33 +29,48 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final me = await auth.api.getMe();
       await data.loadFromMe(me);
-    } catch (_) {
+    } catch (e) {
       // /me failing here just means the dashboard shows "no profile yet" --
       // the user can still try to set one up, which will surface the real error.
+      debugPrint('Home: loading /me failed (${e.runtimeType})');
     }
     if (mounted) setState(() => _loaded = true);
   }
 
   Future<void> _pickProfile(BuildContext context, AppDataProvider data) async {
-    final chosen = await showModalBottomSheet<BirthProfile>(
+    final chosen = await showModalBottomSheet<Object>(
       context: context,
       builder: (sheetContext) => SafeArea(
         child: ListView(
           shrinkWrap: true,
-          children: data.allProfiles.map((p) {
+          children: [
+            ...data.allProfiles.map((p) {
             final isActive = data.activeProfile?.id == p.id;
             return ListTile(
               leading: Icon(isActive ? Icons.radio_button_checked : Icons.radio_button_off),
               title: Text(p.label),
-              subtitle: Text('${p.birthDate}  ${p.birthTime24h}  ·  ${p.calibration.displayLabel}'),
+              subtitle: Text('${p.birthDate}  ${p.birthTime24h}  ·  ${p.calibration.displayLabel}'
+                  '${p.calibration.correctedSummary == null ? '' : '\n${p.calibration.correctedSummary}'}'),
+              isThreeLine: p.calibration.correctedSummary != null,
               onTap: () => Navigator.of(sheetContext).pop(p),
             );
-          }).toList(),
+            }),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.person_add_alt_1),
+              title: const Text('Add another profile'),
+              subtitle: const Text('Spouse, child, parent...'),
+              onTap: () => Navigator.of(sheetContext).pop('add'),
+            ),
+          ],
         ),
       ),
     );
-    if (chosen != null) {
+    if (chosen is BirthProfile) {
       await data.switchProfile(chosen);
+    } else if (chosen == 'add' && context.mounted) {
+      await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ProfileSetupScreen()));
+      if (mounted) setState(() {});
     }
   }
 
@@ -69,10 +84,10 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: Text('Hi, ${auth.currentUser?.name ?? 'there'}'),
         actions: [
-          if (data.allProfiles.length > 1)
+          if (data.allProfiles.isNotEmpty)
             IconButton(
               icon: const Icon(Icons.switch_account),
-              tooltip: 'Switch profile',
+              tooltip: 'Profiles',
               onPressed: () => _pickProfile(context, data),
             ),
           // Dev/QA-only: triggers the backend's /me/test-push (gated by
@@ -165,7 +180,9 @@ class _HomeScreenState extends State<HomeScreen> {
                     title: Text(profile == null ? 'No birth profile yet' : profile.label),
                     subtitle: Text(profile == null
                         ? 'Set up your birth details to get started'
-                        : '${profile.birthDate}  ${profile.birthTime24h}  ·  ${profile.calibration.displayLabel}'),
+                        : '${profile.birthDate}  ${profile.birthTime24h}  ·  ${profile.calibration.displayLabel}'
+                            '${profile.calibration.correctedSummary == null ? '' : '\n${profile.calibration.correctedSummary}'}'),
+                    isThreeLine: profile != null && profile.calibration.correctedSummary != null,
                     trailing: TextButton(
                       child: Text(profile == null ? 'Set up' : 'Edit'),
                       onPressed: () async {
@@ -176,6 +193,33 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
                 ),
+                // Backward compatibility: a profile marked married (either
+                // just now, or from before this feature existed at all --
+                // needs_spouse_details treats both the same) but missing
+                // one or more spouse birth-detail fields needed for the
+                // cross-chart correlation in rectification/chat (see
+                // app/routers/profiles.py's needs_spouse_details). Shown
+                // right under the profile card so it's impossible to miss
+                // without being a blocking dialog.
+                if (profile != null && profile.needsSpouseDetails) ...[
+                  const SizedBox(height: 12),
+                  Card(
+                    color: Theme.of(context).colorScheme.tertiaryContainer,
+                    child: ListTile(
+                      leading: const Icon(Icons.family_restroom),
+                      title: const Text("Add your spouse's birth details"),
+                      subtitle: const Text(
+                          'Marriage, kids, and parents\'/in-laws\' health readings get more '
+                          "accurate when your spouse's chart is on file too."),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () async {
+                        await Navigator.of(context).push(MaterialPageRoute(
+                            builder: (_) => ProfileSetupScreen(existingProfile: profile)));
+                        if (mounted) setState(() {});
+                      },
+                    ),
+                  ),
+                ],
                 if (profile != null) ...[
                   const SizedBox(height: 12),
                   Card(

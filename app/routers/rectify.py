@@ -27,307 +27,69 @@ Flow:
      accumulate without the user calling this endpoint themselves.
 """
 import logging
-import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.ayanamsas import CURATED_AYANAMSAS
+from app.db_util import capped_list
 from app.db import birth_profiles_collection, life_events_collection, rectification_ratings_collection
+from app.event_ordering import sort_events_chronologically
 from app.llm_gateway import generate_structured_answer, generate_structured_from_all
+from app.quota import consume_rectify_run, refund_rectify_run
+from app.rate_limit import limit_per_user
 from app.models import (
     AyanamsaEstimate,
     DisambiguationQuestion,
     RectifyAnswer,
+    RectifyAyanamsaChoice,
     RectifyCandidate,
     RectifyRequest,
     RectifyResult,
     RectifyScoreRequest,
 )
 from app.security import get_current_user
+# Some of these names are not used in this module directly; they are
+# imported so existing references such as
+# `app.routers.rectify.EVENTS_SINCE_LOCK_CHECK_THRESHOLD` keep working.
+from app.rectify_prompts import (  # noqa: F401
+    _build_prompt,
+    _build_recheck_prompt,
+    _build_spouse_line,
+    _followups_instruction,
+    _format_events,
+    _format_history,
+    _full_schema,
+    _recheck_schema,
+)
+from app.rectify_scoring import (  # noqa: F401
+    EVENTS_SINCE_LOCK_CHECK_THRESHOLD,
+    LOCK_THRESHOLD,
+    MAX_SUGGESTED_FOLLOWUPS,
+    MIN_EVENTS_REQUIRED,
+    MODERATE_CONFIDENCE_THRESHOLD,
+    UNLOCK_THRESHOLD,
+    _agree,
+    _candidate_from_raw,
+    _history_entry,
+    _is_future_only_hint,
+    _keep_followup_or_log,
+    _tier_text,
+    _union_followups,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/profiles", tags=["rectification"])
 
-# A provider+ayanamsa combination this confident locks in automatically.
-LOCK_THRESHOLD = 95.0
 
-# Once locked, a recheck against new events that comes back below this is
-# treated as "doesn't fit anymore" and triggers unlocking + a full re-run,
-# rather than quietly staying locked with degraded confidence. Above this
-# but below LOCK_THRESHOLD, it just stays locked with an updated score --
-# a single new event nudging confidence down a little shouldn't force a
-# full re-comparison every time.
-UNLOCK_THRESHOLD = 75.0
-
-MODERATE_CONFIDENCE_THRESHOLD = 50.0
-
-# Too few events makes any rectification -- deterministic or LLM-reasoned
-# -- under-constrained. Also reused as the events-since-last-check bar for
-# auto-rechecking a locked profile (see app.routers.profiles), so the two
-# don't drift apart as separate magic numbers.
-MIN_EVENTS_REQUIRED = 6
-EVENTS_SINCE_LOCK_CHECK_THRESHOLD = MIN_EVENTS_REQUIRED
-
-MAX_SUGGESTED_FOLLOWUPS = 3
-
-
-def _format_events(events: list[dict]) -> str:
-    """Renders one line per life event for the prompt. Most events are
-    plain manually-logged ones (occurred_score absent -- unchanged
-    formatting). Events that came from answering a suggested_followups
-    question (see add_followup_and_rectify) carry an occurred_score --
-    the user's 1-5 rating of how much it resonates -- and get phrased as
-    either confirming or disconfirming evidence, since "no, that didn't
-    happen around then" is just as useful for ruling a candidate out as a
-    real event is for ruling one in. Those events also may have no
-    exact_date (the user often doesn't know one, only a rough window), so
-    fall back to the time_frame_hint text in that case."""
-    lines = []
-    for e in events:
-        occurred_score = e.get("occurred_score")
-        when = e.get("exact_date") or e.get("time_frame_hint") or "an unknown date"
-        note = f" -- {e['notes']}" if e.get("notes") else ""
-        if occurred_score is None:
-            lines.append(
-                f"- {e['category']} on {when} (importance {e.get('impact_weight_score', 1.0)}){note}"
-            )
-        elif occurred_score <= 2:
-            lines.append(
-                f"- User says {e['category']} did NOT notably happen around {when} "
-                f"(rated {occurred_score}/5 -- treat as evidence AGAINST candidates whose dasha "
-                f"periods would imply this){note}"
-            )
-        else:
-            lines.append(
-                f"- {e['category']} around {when}, user rates this {occurred_score}/5 as "
-                f"matching their life (importance {e.get('impact_weight_score', 1.0)}){note}"
-            )
-    return "\n".join(lines) if lines else "(none)"
-
-
-def _format_history(history: list[dict], limit: int = 3) -> str:
-    if not history:
-        return "(none -- this is the first rectification attempt for this profile)"
-    lines = [
-        f"- At {h['attempt_at']}, {h['provider']} concluded {h['best_ayanamsa']} / "
-        f"{h['best_rectified_birth_time_24h']} at {h['best_confidence_score']:.0f}% confidence, "
-        f"based on {h['events_used']} life events."
-        for h in history[-limit:]
-    ]
-    return "\n".join(lines)
-
-
-def _build_prompt(profile: dict, events: list[dict], window_minutes: int, history: list[dict]) -> str:
-    coords = profile["geographic_coordinates"]
-    today = datetime.now(timezone.utc).date().isoformat()
-    return (
-        "You are an expert Vedic astrologer performing birth-time rectification. "
-        f"Today's real-world date is {today} -- the user is answering these questions now, "
-        "so every event you ask about must be something that could already have happened by "
-        f"then.\n\n"
-        f"The user states they were born on {profile['birth_date']} at {profile['birth_time_24h']} "
-        f"(local time), at latitude {coords['latitude']}, longitude {coords['longitude']}, "
-        f"timezone offset {coords['timezone_offset_hours']} hours from UTC. They are unsure of the "
-        f"exact time within +/- {window_minutes} minutes of that stated time.\n\n"
-        f"Their real life events, which should align with Vimshottari dasha/bhukti lord "
-        f"transitions if the birth time and ayanamsa are correct:\n{_format_events(events)}\n\n"
-        f"Prior rectification attempts for this profile:\n{_format_history(history)}\n\n"
-        f"For each of these ayanamsas -- {', '.join(CURATED_AYANAMSAS)} -- reason about which "
-        "exact birth time within the stated window best explains the life events via dasha/bhukti "
-        "lord matching, and give that ayanamsa's best rectified time and your confidence (0-100) "
-        "that it's correct. Then explain your overall reasoning in at most 2-3 sentences -- keep it "
-        "tight, not a full walkthrough. Finally, suggest 2-3 more life events that would "
-        "most help sharpen the estimate further -- prefer ones where the different "
-        "ayanamsas/candidate birth times above imply DIFFERENT dasha/bhukti periods, so the "
-        "answer can help distinguish between them. For each, give a short UPPER_SNAKE_CASE "
-        "category slug, a natural ready-to-show question (e.g. category \"CHRONIC_ILLNESS\", "
-        "question \"Have you had any major health diagnoses or surgeries?\"), and a "
-        "time_frame_hint -- your best plain-language guess at when such an event would fall "
-        "if one of the candidates above is correct (e.g. \"sometime between 2012 and "
-        "2015\"), so the user can rate how much it resonates rather than needing to recall "
-        "an exact date. Leave time_frame_hint as an empty string only if you genuinely "
-        f"can't narrow it down. IMPORTANT: this is strictly backward-looking -- only ask about "
-        f"events that would have already happened on or before {today} under the candidate "
-        "times above. Never suggest a question about something that would only happen in the "
-        "future relative to today; if every plausible event for a dasha/bhukti period you'd "
-        "otherwise ask about falls after today, skip that period and pick a different one "
-        "that's already in the past instead."
-    )
-
-
-def _build_recheck_prompt(
-    profile: dict, events: list[dict], locked_ayanamsa: str, locked_time: str, history: list[dict]
-) -> str:
-    coords = profile["geographic_coordinates"]
-    return (
-        "You are an expert Vedic astrologer. A user's chart was previously rectified to "
-        f"{locked_time} using the {locked_ayanamsa} ayanamsa (born {profile['birth_date']}, "
-        f"stated time {profile['birth_time_24h']}, latitude {coords['latitude']}, "
-        f"longitude {coords['longitude']}, timezone offset {coords['timezone_offset_hours']}).\n\n"
-        f"Here is their full, current list of life events, including any added since that "
-        f"rectification:\n{_format_events(events)}\n\n"
-        f"Prior rectification attempts:\n{_format_history(history)}\n\n"
-        f"Re-evaluate: using the {locked_ayanamsa} ayanamsa and a birth time close to "
-        f"{locked_time}, how well do ALL of these events -- including the newest ones -- still "
-        "fit via dasha/bhukti lord matching? Give your best refined birth time near the original, "
-        "and an updated confidence score (0-100) reflecting the full event list. Explain your "
-        "reasoning in at most 2-3 sentences -- keep it tight, not a full walkthrough."
-    )
-
-
-def _full_schema() -> dict:
-    return {
-        "type": "object",
-        "properties": {
-            "ayanamsa_results": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "ayanamsa": {"type": "string", "enum": CURATED_AYANAMSAS},
-                        "rectified_birth_time_24h": {"type": "string"},
-                        "confidence_score": {"type": "number"},
-                    },
-                    "required": ["ayanamsa", "rectified_birth_time_24h", "confidence_score"],
-                    "additionalProperties": False,
-                },
-            },
-            "reasoning": {"type": "string"},
-            "suggested_followups": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "category": {"type": "string"},
-                        "question_text": {"type": "string"},
-                        "time_frame_hint": {"type": "string"},
-                    },
-                    "required": ["category", "question_text", "time_frame_hint"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        "required": ["ayanamsa_results", "reasoning", "suggested_followups"],
-        "additionalProperties": False,
-    }
-
-
-def _recheck_schema() -> dict:
-    return {
-        "type": "object",
-        "properties": {
-            "rectified_birth_time_24h": {"type": "string"},
-            "confidence_score": {"type": "number"},
-            "reasoning": {"type": "string"},
-        },
-        "required": ["rectified_birth_time_24h", "confidence_score", "reasoning"],
-        "additionalProperties": False,
-    }
-
-
-_YEAR_RE = re.compile(r"(?<!\d)(\d{4})(?!\d)")
-
-
-def _is_future_only_hint(time_frame_hint: str) -> bool:
-    """Defensive backstop for _build_prompt's "don't ask about the future"
-    instruction, in case a provider ignores it anyway. Pulls every 4-digit
-    year mentioned in the hint (e.g. "sometime between 2012 and 2015") and
-    flags it only when EVERY year mentioned is still ahead of today -- a
-    hint that straddles today (e.g. "between 2024 and 2027" when it's
-    currently 2026) is left alone, since part of that window has already
-    happened. A hint with no year at all (e.g. "around when you started
-    college") can't be checked this way and is left alone too."""
-    years = [int(y) for y in _YEAR_RE.findall(time_frame_hint)]
-    if not years:
-        return False
-    current_year = datetime.now(timezone.utc).year
-    return all(y > current_year for y in years)
-
-
-def _keep_followup_or_log(provider: str, followup: dict) -> bool:
-    hint = followup.get("time_frame_hint") or ""
-    if _is_future_only_hint(hint):
-        logger.warning(
-            "Dropping future-dated rectify follow-up from provider=%s category=%s hint=%r "
-            "(_build_prompt asked it not to do this)",
-            provider, followup.get("category"), hint,
-        )
-        return False
-    return True
-
-
-def _candidate_from_raw(provider: str, raw: dict) -> RectifyCandidate:
-    ayanamsa_results = [
-        AyanamsaEstimate(
-            ayanamsa=r["ayanamsa"],
-            rectified_birth_time_24h=r["rectified_birth_time_24h"],
-            confidence_score=float(r["confidence_score"]),
-        )
-        for r in raw["ayanamsa_results"]
-    ]
-    best = max(ayanamsa_results, key=lambda r: r.confidence_score)
-    return RectifyCandidate(
-        provider=provider,
-        ayanamsa_results=ayanamsa_results,
-        best_ayanamsa=best.ayanamsa,
-        best_rectified_birth_time_24h=best.rectified_birth_time_24h,
-        best_confidence_score=best.confidence_score,
-        reasoning=raw.get("reasoning", ""),
-        # The model authors its own natural question text per category now
-        # (see _build_prompt) instead of us title-casing whatever slug it
-        # invents, which produced awkward results like "Can you add a
-        # Exact Dates Of Vehicle Accidents Or Purchases event?". Falls
-        # back to a templated question only if a provider (or an older
-        # cached shape) omits question_text.
-        suggested_followups=[
-            DisambiguationQuestion(
-                category=f["category"],
-                question_text=f.get("question_text")
-                or f"Can you tell me more about {f['category'].replace('_', ' ').lower()}?",
-                time_frame_hint=f.get("time_frame_hint") or "",
-            )
-            # Backstop against the provider ignoring _build_prompt's
-            # backward-looking-only instruction and suggesting a question
-            # about an event that hasn't happened yet -- filtered BEFORE
-            # the MAX_SUGGESTED_FOLLOWUPS slice so a dropped future-dated
-            # one doesn't crowd out a good, usable suggestion behind it.
-            for f in raw.get("suggested_followups", [])
-            if _keep_followup_or_log(provider, f)
-        ][:MAX_SUGGESTED_FOLLOWUPS],
-    )
-
-
-def _agree(a: RectifyCandidate, b: RectifyCandidate, tolerance_minutes: int = 15) -> bool:
-    if a.best_ayanamsa != b.best_ayanamsa:
-        return False
-    fmt = "%H:%M:%S"
-    try:
-        ta = datetime.strptime(a.best_rectified_birth_time_24h, fmt)
-        tb = datetime.strptime(b.best_rectified_birth_time_24h, fmt)
-    except ValueError:
-        return False
-    return abs((ta - tb).total_seconds()) <= tolerance_minutes * 60
-
-
-def _tier_text(confidence_score: float) -> str:
-    if confidence_score >= LOCK_THRESHOLD:
-        return "This is a strong, well-supported match."
-    if confidence_score >= MODERATE_CONFIDENCE_THRESHOLD:
-        return "This is a reasonable match, though not an overwhelming one."
-    return "This is only a rough estimate at this point -- treat it as a starting point, not a final answer."
-
-
-def _history_entry(candidate: RectifyCandidate, events_used: int) -> dict:
-    return {
-        "attempt_at": datetime.now(timezone.utc).isoformat(),
-        "provider": candidate.provider,
-        "best_ayanamsa": candidate.best_ayanamsa,
-        "best_rectified_birth_time_24h": candidate.best_rectified_birth_time_24h,
-        "best_confidence_score": candidate.best_confidence_score,
-        "events_used": events_used,
-    }
+# Fields only meaningful while a pending-review batch is open; cleared when
+# a calibration is settled (the old whole-document replace did this
+# implicitly).
+_PENDING_FIELDS = {
+    "calibration.pending_candidates": "",
+    "calibration.answered_followup_categories": "",
+    "calibration.locked_followups": "",
+}
 
 
 async def _lock_in(profile_id: str, candidate: RectifyCandidate, events_used: int, history: list[dict]) -> dict:
@@ -339,23 +101,22 @@ async def _lock_in(profile_id: str, candidate: RectifyCandidate, events_used: in
         "rectified_birth_time_24h": candidate.best_rectified_birth_time_24h,
         "confidence_score": candidate.best_confidence_score,
         "events_since_lock_check": 0,
-        "history": history + [_history_entry(candidate, events_used)],
         "calibrated_at": datetime.now(timezone.utc),
         "locked_at": datetime.now(timezone.utc),
     }
-    await birth_profiles_collection().update_one({"_id": profile_id}, {"$set": {"calibration": calibration}})
-    return calibration
-
-
-def _union_followups(candidates: list[RectifyCandidate]) -> list[DisambiguationQuestion]:
-    seen: set[str] = set()
-    out: list[DisambiguationQuestion] = []
-    for c in candidates:
-        for q in c.suggested_followups:
-            if q.category not in seen:
-                seen.add(q.category)
-                out.append(q)
-    return out
+    entry = _history_entry(candidate, events_used)
+    # Replace the calibration fields individually and APPEND to history
+    # with $push, so two concurrent calls can't overwrite each other's
+    # history entries (read-modify-write of the whole list used to).
+    await birth_profiles_collection().update_one(
+        {"_id": profile_id},
+        {
+            "$set": {f"calibration.{k}": v for k, v in calibration.items()},
+            "$push": {"calibration.history": entry},
+            "$unset": _PENDING_FIELDS,
+        },
+    )
+    return {**calibration, "history": history + [entry]}
 
 
 async def _run_locked_recheck(
@@ -375,6 +136,21 @@ async def _run_locked_recheck(
     )
     new_confidence = float(raw["confidence_score"])
     new_time = raw.get("rectified_birth_time_24h", locked_time)
+    # Still asked for, and still filtered through the same future-dated
+    # backstop as the full multi-provider path, even though this is the
+    # cheap single-provider recheck -- see DefectBacklog: locking a chart
+    # shouldn't silently stop follow-up questions from ever being
+    # offered again, just keep them cheap (one provider, not a fan-out).
+    followups = [
+        DisambiguationQuestion(
+            category=f["category"],
+            question_text=f.get("question_text")
+            or f"Can you tell me more about {f['category'].replace('_', ' ').lower()}?",
+            time_frame_hint=f.get("time_frame_hint") or "",
+        )
+        for f in raw.get("suggested_followups", [])
+        if _keep_followup_or_log(locked_provider, f)
+    ][:MAX_SUGGESTED_FOLLOWUPS]
     candidate = RectifyCandidate(
         provider=locked_provider,
         ayanamsa_results=[
@@ -386,6 +162,7 @@ async def _run_locked_recheck(
         best_rectified_birth_time_24h=new_time,
         best_confidence_score=new_confidence,
         reasoning=raw.get("reasoning", ""),
+        suggested_followups=followups,
     )
 
     if new_confidence >= UNLOCK_THRESHOLD:
@@ -396,8 +173,14 @@ async def _run_locked_recheck(
                     "calibration.rectified_birth_time_24h": new_time,
                     "calibration.confidence_score": new_confidence,
                     "calibration.events_since_lock_check": 0,
-                    "calibration.history": history + [_history_entry(candidate, len(events))],
-                }
+                    # The batch of follow-ups just offered: kept so that
+                    # answering them is batched (recorded one by one, ONE
+                    # recheck once all are answered) instead of every
+                    # answer triggering a recheck that replaces the rest.
+                    "calibration.locked_followups": [f.model_dump() for f in followups],
+                    "calibration.answered_followup_categories": [],
+                },
+                "$push": {"calibration.history": _history_entry(candidate, len(events))},
             },
         )
         return RectifyResult(
@@ -411,6 +194,7 @@ async def _run_locked_recheck(
                 f"Your new events still fit the locked {locked_ayanamsa} / {new_time} calibration "
                 f"({new_confidence:.0f}% confidence). No change needed."
             ),
+            suggested_followups=followups,
         )
 
     # Doesn't fit anymore -- unlock and fall back to a full re-run, which
@@ -423,8 +207,9 @@ async def _run_locked_recheck(
                 "calibration.locked": False,
                 "calibration.status": "pending_review",
                 "calibration.events_since_lock_check": 0,
-                "calibration.history": history + [_history_entry(candidate, len(events))],
-            }
+            },
+            "$push": {"calibration.history": _history_entry(candidate, len(events))},
+            "$unset": {"calibration.locked_followups": ""},
         },
     )
     return await run_rectification(profile_id, profile["userId"], RectifyRequest())
@@ -435,7 +220,15 @@ async def run_rectification(profile_id: str, user_id: str, req: RectifyRequest) 
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
 
-    events = await life_events_collection().find({"profileId": profile_id}).to_list(length=1000)
+    events = await capped_list(life_events_collection().find({"profileId": profile_id}), 1000, "life events")
+    # Sorted by when each event actually happened, not insertion order --
+    # otherwise e.g. an earlier-born child logged AFTER a younger
+    # sibling's event would be presented to the model in the wrong
+    # sequence, which matters for anything that depends on ordering
+    # (which child is older, which job came first, etc). See
+    # app.event_ordering. Covers both branches below: the full
+    # multi-provider prompt and the locked-profile recheck.
+    events = sort_events_chronologically(events)
     if len(events) < MIN_EVENTS_REQUIRED:
         raise HTTPException(
             status_code=400,
@@ -495,6 +288,12 @@ async def run_rectification(profile_id: str, user_id: str, req: RectifyRequest) 
             "$set": {
                 "calibration.status": "pending_review",
                 "calibration.pending_candidates": [c.model_dump() for c in candidates],
+                # Fresh batch of suggested_followups just got generated (see
+                # _union_followups below) -- reset the answered-so-far
+                # tracking used by add_followup_and_rectify so it doesn't
+                # immediately re-run a full fan-out the moment just ONE of
+                # them gets answered. See that function's docstring.
+                "calibration.answered_followup_categories": [],
             }
         },
     )
@@ -529,20 +328,78 @@ async def run_rectification(profile_id: str, user_id: str, req: RectifyRequest) 
     )
 
 
+# At most this many rectification calls per user per minute, on top of
+# the daily cap in app/quota.py -- stops a retry loop or a script from
+# firing a burst of multi-provider LLM calls.
+_rectify_rate_limit = limit_per_user("rectify", max_calls=6, window_seconds=60)
+
+
+async def _metered_rectification(profile_id: str, user_id: str, req: RectifyRequest) -> RectifyResult:
+    """run_rectification for a user-initiated call: counted against the
+    user's daily cap (app.quota.consume_rectify_run), and given back if
+    the run fails before producing a result (too few events, provider
+    outage), so a failure doesn't use up the allowance."""
+    await consume_rectify_run(user_id)
+    try:
+        return await run_rectification(profile_id, user_id, req)
+    except Exception:
+        await refund_rectify_run(user_id)
+        raise
+
+
+async def background_recheck(profile_id: str, user_id: str) -> None:
+    """Best-effort recheck run after a response has already been sent
+    (e.g. a life event that crossed the locked-profile staleness
+    threshold). Metered like a user-initiated run; any failure -- cap
+    reached, provider outage -- is logged WITHOUT detail and swallowed,
+    since nobody is waiting on the result."""
+    try:
+        await _metered_rectification(profile_id, user_id, RectifyRequest())
+    except Exception as exc:
+        logger.warning("Background rectification recheck skipped (%s).", type(exc).__name__)
+
+
 @router.post("/{profile_id}/rectify", response_model=RectifyResult)
 async def start_rectification(
-    profile_id: str, req: RectifyRequest = RectifyRequest(), user: dict = Depends(get_current_user)
+    profile_id: str, req: RectifyRequest = RectifyRequest(), user: dict = Depends(_rectify_rate_limit)
 ):
-    return await run_rectification(profile_id, user["_id"], req)
+    return await _metered_rectification(profile_id, user["_id"], req)
 
 
 @router.post("/{profile_id}/rectify/answer", response_model=RectifyResult)
-async def add_followup_and_rectify(profile_id: str, answer: RectifyAnswer, user: dict = Depends(get_current_user)):
-    """Convenience endpoint: add one more life event (typically for one of
-    the `suggested_followups` categories) and immediately re-run
-    rectification in a single call. Purely a shortcut -- POST an event via
-    /profiles/{id}/events and POST /profiles/{id}/rectify separately
-    achieves the same thing."""
+async def add_followup_and_rectify(profile_id: str, answer: RectifyAnswer, user: dict = Depends(_rectify_rate_limit)):
+    """Adds one more life event (typically for one of the
+    `suggested_followups` categories) and, once the WHOLE current batch of
+    suggested follow-ups has been answered, re-runs rectification with all
+    of them at once.
+
+    This used to re-run rectification (a full multi-provider fan-out, if
+    the profile isn't locked yet) immediately after every single answer.
+    That was both wasteful -- one fan-out per answer instead of one for
+    the whole batch -- and confusing: run_rectification generates a BRAND
+    NEW set of suggested_followups each time it runs, so answering
+    question 1 of a 3-question batch would immediately replace questions
+    2 and 3 with a different batch, making it look like they'd been
+    skipped/lost rather than simply not gotten to yet (this is what
+    Divakar flagged as feeling like "missed out" on the other questions).
+
+    Now: the event is always recorded immediately. Whether a recalibration
+    actually runs depends on how many of the CURRENT batch (the
+    `suggested_followups` from the last real rectification run, tracked
+    via `calibration.pending_candidates`) are still unanswered:
+      - If this answer completes the batch (or there's no tracked batch to
+        begin with, e.g. the very first rectification, or the profile is
+        locked and therefore never generates a batch at all), it falls
+        through to a real `run_rectification` call below, same as before.
+      - Otherwise, no LLM call happens at all -- just records progress and
+        returns the SAME comparison as before, with the still-pending
+        questions trimmed down to what's actually left, so the user can
+        keep answering them one at a time without the list getting
+        replaced out from under them.
+    A "Recalibrate now" action (POST /{profile_id}/rectify, unconditional)
+    remains available for anyone who'd rather not answer the rest of the
+    batch and just wants to proceed with what they've given so far.
+    """
     profile = await birth_profiles_collection().find_one({"_id": profile_id, "userId": user["_id"]})
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
@@ -553,6 +410,7 @@ async def add_followup_and_rectify(profile_id: str, answer: RectifyAnswer, user:
         "category": answer.category,
         "exact_date": answer.exact_date,
         "time_frame_hint": answer.time_frame_hint,
+        "question_text": answer.question_text,
         "occurred_score": answer.occurred_score,
         # Scale importance by how strongly the user says this resonates,
         # rather than always weighting it the same as a normal manually-
@@ -566,7 +424,90 @@ async def add_followup_and_rectify(profile_id: str, answer: RectifyAnswer, user:
         "source": "suggested_followup_answer",
         "createdAt": datetime.now(timezone.utc),
     })
-    return await run_rectification(profile_id, user["_id"], RectifyRequest())
+
+    calibration = profile.get("calibration", {})
+
+    # Locked profile: same batching as below, over the follow-ups its last
+    # (cheap) recheck offered -- otherwise each answer would trigger a
+    # recheck that generates a different set of questions.
+    locked_raw = calibration.get("locked_followups") or []
+    if calibration.get("locked") and locked_raw:
+        batch = [DisambiguationQuestion(**f) for f in locked_raw]
+        in_batch = answer.category in {f.category for f in batch}
+        answered = set(calibration.get("answered_followup_categories") or [])
+        if in_batch:
+            answered.add(answer.category)
+        remaining = [f for f in batch if f.category not in answered]
+        if remaining:
+            if in_batch:
+                await birth_profiles_collection().update_one(
+                    {"_id": profile_id},
+                    {"$addToSet": {"calibration.answered_followup_categories": answer.category}},
+                )
+            events_considered = len(
+                await capped_list(life_events_collection().find({"profileId": profile_id}), 1000, "life events")
+            )
+            return RectifyResult(
+                status="locked",
+                chosen_provider=calibration.get("source_provider"),
+                chosen_ayanamsa=calibration.get("chosen_ayanamsa"),
+                rectified_birth_time_24h=calibration.get("rectified_birth_time_24h"),
+                confidence_score=calibration.get("confidence_score"),
+                events_considered=events_considered,
+                message=(
+                    f"Thanks -- recorded. {len(remaining)} more question"
+                    f"{'s' if len(remaining) != 1 else ''} from this batch whenever you're ready; "
+                    "the check runs once they're all answered, or tap \"Check again now\" to run it early."
+                ),
+                suggested_followups=remaining,
+            )
+        # Whole batch answered -- fall through to one recheck covering all of it.
+
+    pending_candidates_raw = calibration.get("pending_candidates") or []
+    if calibration.get("status") == "pending_review" and pending_candidates_raw:
+        candidates = [RectifyCandidate(**c) for c in pending_candidates_raw]
+        current_batch = _union_followups(candidates)
+        batch_categories = {f.category for f in current_batch}
+        answered = set(calibration.get("answered_followup_categories") or [])
+        if answer.category in batch_categories:
+            answered.add(answer.category)
+        remaining = [f for f in current_batch if f.category not in answered]
+
+        if remaining:
+            if answer.category in batch_categories:
+                await birth_profiles_collection().update_one(
+                    {"_id": profile_id},
+                    {"$addToSet": {"calibration.answered_followup_categories": answer.category}},
+                )
+            agreement = None
+            if len(candidates) > 1:
+                agreement = "agree" if _agree(candidates[0], candidates[1]) else "disagree"
+            top = max(candidates, key=lambda c: c.best_confidence_score)
+            events_considered = len(
+                await capped_list(life_events_collection().find({"profileId": profile_id}), 1000, "life events")
+            )
+            return RectifyResult(
+                status="pending_review",
+                candidates=candidates,
+                agreement=agreement,
+                chosen_provider=top.provider,
+                chosen_ayanamsa=top.best_ayanamsa,
+                rectified_birth_time_24h=top.best_rectified_birth_time_24h,
+                confidence_score=top.best_confidence_score,
+                events_considered=events_considered,
+                message=(
+                    f"Thanks -- recorded. {len(remaining)} more question"
+                    f"{'s' if len(remaining) != 1 else ''} from this batch whenever you're ready; "
+                    "recalibration runs automatically once they're all answered, or you can "
+                    "recalibrate now with what you've given so far."
+                ),
+                suggested_followups=remaining,
+            )
+        # Batch fully answered (or this category wasn't part of it, which
+        # shouldn't normally happen) -- fall through to a real rerun,
+        # which will fold in every event from the batch at once.
+
+    return await _metered_rectification(profile_id, user["_id"], RectifyRequest())
 
 
 @router.post("/{profile_id}/rectify/score", response_model=RectifyResult)
@@ -600,7 +541,7 @@ async def score_candidates(profile_id: str, req: RectifyScoreRequest, user: dict
         raise HTTPException(status_code=400, detail="None of the rated providers match the pending candidates.")
     winner = RectifyCandidate(**max(scored, key=lambda c: ratings_by_provider[c["provider"]]))
 
-    events = await life_events_collection().find({"profileId": profile_id}).to_list(length=1000)
+    events = await capped_list(life_events_collection().find({"profileId": profile_id}), 1000, "life events")
     history = calibration.get("history", [])
 
     if winner.best_confidence_score >= LOCK_THRESHOLD:
@@ -613,10 +554,16 @@ async def score_candidates(profile_id: str, req: RectifyScoreRequest, user: dict
             "chosen_ayanamsa": winner.best_ayanamsa,
             "rectified_birth_time_24h": winner.best_rectified_birth_time_24h,
             "confidence_score": winner.best_confidence_score,
-            "history": history + [_history_entry(winner, len(events))],
             "calibrated_at": datetime.now(timezone.utc),
         }
-        await birth_profiles_collection().update_one({"_id": profile_id}, {"$set": {"calibration": new_calibration}})
+        await birth_profiles_collection().update_one(
+            {"_id": profile_id},
+            {
+                "$set": {f"calibration.{k}": v for k, v in new_calibration.items()},
+                "$push": {"calibration.history": _history_entry(winner, len(events))},
+                "$unset": _PENDING_FIELDS,
+            },
+        )
 
     tier = _tier_text(winner.best_confidence_score)
     return RectifyResult(
@@ -630,6 +577,89 @@ async def score_candidates(profile_id: str, req: RectifyScoreRequest, user: dict
             f"You rated {winner.provider}'s reading highest. Calibrated to "
             f"{winner.best_rectified_birth_time_24h} using the {winner.best_ayanamsa} ayanamsa at "
             f"{winner.best_confidence_score:.0f}% confidence. {tier}"
+        ),
+    )
+
+
+@router.post("/{profile_id}/rectify/choose-ayanamsa", response_model=RectifyResult)
+async def choose_ayanamsa(profile_id: str, req: RectifyAyanamsaChoice, user: dict = Depends(get_current_user)):
+    """Directly locks to ONE specific (provider, ayanamsa) combination
+    from the last rectification run, instead of only ever being able to
+    accept whichever ayanamsa a provider itself ranked best.
+
+    Every curated ayanamsa was already scored during the last /rectify
+    call (see _full_schema's ayanamsa_results, now with its own
+    `reasoning` per ayanamsa) -- the mobile app shows all of them, with
+    their scores and reasoning, so the user can expand a lower-ranked
+    one and judge for themselves whether it actually fits their life
+    events better than the provider's own top pick. This endpoint is how
+    that choice gets applied.
+
+    Unlike /rectify/score (which gates on LOCK_THRESHOLD and may leave
+    the result at "calibrated" rather than "locked" for a middling
+    score), an explicit choice here always locks immediately -- the user
+    deliberately picked this one after reading why it fits, so there's
+    no confidence threshold to second-guess them with."""
+    profile = await birth_profiles_collection().find_one({"_id": profile_id, "userId": user["_id"]})
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    calibration = profile.get("calibration", {})
+    pending = calibration.get("pending_candidates")
+    if not pending:
+        raise HTTPException(
+            status_code=400, detail="No pending rectification candidates to choose from. Run /rectify first."
+        )
+
+    candidate_raw = next((c for c in pending if c["provider"] == req.provider), None)
+    if candidate_raw is None:
+        raise HTTPException(status_code=404, detail=f"No pending candidate from provider '{req.provider}'.")
+    candidate = RectifyCandidate(**candidate_raw)
+    chosen = next((r for r in candidate.ayanamsa_results if r.ayanamsa == req.ayanamsa), None)
+    if chosen is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Provider '{req.provider}' has no ayanamsa result named '{req.ayanamsa}'.",
+        )
+
+    # Override just the "best" fields to the user's explicit pick --
+    # keeps provider/ayanamsa_results/suggested_followups intact for
+    # history/record-keeping, and prefers this ayanamsa's OWN reasoning
+    # (why THIS one fits) over the candidate's overall "why my top pick
+    # is best" reasoning, which wouldn't make sense here if the user
+    # picked something other than that top pick.
+    chosen_candidate = candidate.model_copy(update={
+        "best_ayanamsa": chosen.ayanamsa,
+        "best_rectified_birth_time_24h": chosen.rectified_birth_time_24h,
+        "best_confidence_score": chosen.confidence_score,
+        "reasoning": chosen.reasoning or candidate.reasoning,
+    })
+
+    await rectification_ratings_collection().insert_one({
+        "_id": f"{profile_id}-{datetime.now(timezone.utc).timestamp()}",
+        "profileId": profile_id,
+        "userId": user["_id"],
+        "ratings": {},
+        "manual_ayanamsa_choice": {"provider": req.provider, "ayanamsa": req.ayanamsa},
+        "createdAt": datetime.now(timezone.utc),
+    })
+
+    events = await capped_list(life_events_collection().find({"profileId": profile_id}), 1000, "life events")
+    history = calibration.get("history", [])
+    await _lock_in(profile_id, chosen_candidate, len(events), history)
+
+    tier = _tier_text(chosen_candidate.best_confidence_score)
+    return RectifyResult(
+        status="locked",
+        chosen_provider=chosen_candidate.provider,
+        chosen_ayanamsa=chosen_candidate.best_ayanamsa,
+        rectified_birth_time_24h=chosen_candidate.best_rectified_birth_time_24h,
+        confidence_score=chosen_candidate.best_confidence_score,
+        events_considered=len(events),
+        message=(
+            f"Locked to the {chosen_candidate.best_ayanamsa} ayanamsa at "
+            f"{chosen_candidate.best_rectified_birth_time_24h} ({chosen_candidate.best_confidence_score:.0f}% "
+            f"confidence per {chosen_candidate.provider}), as you chose. {tier}"
         ),
     )
 

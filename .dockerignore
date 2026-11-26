@@ -1,0 +1,21 @@
+# Keep secrets and everything the API doesn't need out of the image.
+.env
+.env.*
+atlas-credentials.env
+firebase-service-account.json
+*firebase-adminsdk*.json
+.git
+.github
+.venv
+venv
+__pycache__
+*.pyc
+logs
+mobile_app
+tests
+scripts
+.idea
+.claude
+*.md
+PSOutput.txt
+DecoupledAstroEngine.java

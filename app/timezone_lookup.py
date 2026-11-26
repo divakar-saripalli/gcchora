@@ -18,10 +18,18 @@ from timezonefinder import TimezoneFinder
 
 logger = logging.getLogger(__name__)
 
-# TimezoneFinder loads a sizeable in-memory spatial index -- build it once
-# at import time (module-level singleton) and reuse it, rather than
-# rebuilding it on every call.
-_tf = TimezoneFinder()
+# TimezoneFinder loads a sizeable in-memory spatial index -- built once,
+# lazily, then reused.
+_tf: TimezoneFinder | None = None
+
+
+def _get_tf() -> TimezoneFinder:
+    """Built on first use, not at import -- the index is large, and
+    importing this module (app startup, every test) shouldn't pay for it."""
+    global _tf
+    if _tf is None:
+        _tf = TimezoneFinder()
+    return _tf
 
 
 def compute_timezone_offset_hours(
@@ -37,20 +45,24 @@ def compute_timezone_offset_hours(
     case, never let this block profile creation/editing.
     """
     try:
-        tz_name = _tf.timezone_at(lat=latitude, lng=longitude)
+        tz_name = _get_tf().timezone_at(lat=latitude, lng=longitude)
         if tz_name is None:
-            logger.warning(
-                "No timezone found for coordinates (%s, %s) -- leaving timezone_offset_hours unchanged.",
-                latitude, longitude,
-            )
+            # Deliberately not logging the actual coordinates here --
+            # exact birth coordinates are sensitive personal data (see
+            # app/field_encryption.py, which encrypts this same field at
+            # rest) and have no business sitting in plaintext in an
+            # application log just because a lookup happened to miss.
+            logger.warning("No timezone found for the given coordinates -- leaving timezone_offset_hours unchanged.")
             return None
         local_dt = datetime.strptime(f"{birth_date} {birth_time_24h}", "%Y-%m-%d %H:%M:%S")
         local_dt = local_dt.replace(tzinfo=ZoneInfo(tz_name))
         offset = local_dt.utcoffset()
         return offset.total_seconds() / 3600 if offset is not None else None
     except Exception:
-        logger.exception(
-            "Failed to compute timezone offset for (%s, %s) at %s %s -- leaving unchanged.",
-            latitude, longitude, birth_date, birth_time_24h,
-        )
+        # Same reasoning as above -- never log the actual coordinates or
+        # exact birth date/time. logger.exception still captures the
+        # stack trace and exception type/message, which is enough to
+        # diagnose a parsing bug without writing someone's birth details
+        # to disk in plaintext.
+        logger.exception("Failed to compute timezone offset for the given coordinates/date/time -- leaving unchanged.")
         return None

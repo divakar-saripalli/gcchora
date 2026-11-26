@@ -42,3 +42,11 @@ Core algorithm (shared logic, duplicated across both files):
 3. **Event scoring**: for each historical life event, find the active mahadasha/bhukti lord at that date, then check membership against `astro_rules.json`'s significator list for that category (AND-matching: both the mahadasha and bhukti lord had to be a significator). A "confidence rating" is `earned_weight / total_weight * 100` across all events.
 
 `astro_rules.json` is the shared significator matrix (event category → list of planet names expected to be active during that kind of event); `app/engines/significators.py` prefers a MongoDB `significator_rules` collection (seeded by `scripts/seed_rules.py`) over the local file, matching the original prototype's fallback behavior. Neither the Mongo collection nor this file is read by the current LLM-reasoned flow.
+
+
+## Module layout notes (added with the architecture-review fixes)
+
+- `app/routers/rectify.py` holds the rectification endpoints and the lock/recheck flow. Prompt text and JSON schemas live in `app/rectify_prompts.py`; thresholds and result-parsing helpers live in `app/rectify_scoring.py`.
+- `app/quota.py` meters chat questions and rectification runs with single conditional MongoDB updates. `app/rate_limit.py` is an in-memory per-user/per-IP rate limiter.
+- `app/field_encryption.py` encrypts selected fields at the collection boundary (`app/db.py`). Collections wrapped by it only support the methods implemented there.
+- Tests: `pip install -r requirements-dev.txt` then `pytest`. They use `tests/fake_mongo.py` instead of a database and never call an LLM provider. Add a test alongside any change to quota, encryption or the rectification flow.

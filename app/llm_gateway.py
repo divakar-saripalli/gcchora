@@ -43,6 +43,40 @@ logger = logging.getLogger(__name__)
 # of seconds to a day, far too long to block a live request on.
 _RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
 
+# REVERTED (see DefectBacklog): a hard CHAT_MAX_OUTPUT_TOKENS cap of 400
+# used to be applied here, meant as a backstop against a runaway reply
+# behind the existing "3-5 sentences" soft prompt instruction (see
+# _build_context in app.routers.chat). In practice it visibly clipped
+# normal, reasonable answers -- astrology terminology (ayanamsa/dasha/
+# bhukti names, Sanskrit terms) appears to tokenize less efficiently
+# than plain English, so 400 tokens bought noticeably less actual
+# content than expected, and Divakar flagged real replies as "very
+# short... really annoying". Removed entirely rather than just raised,
+# since there's no way to verify a safe number against the real
+# provider from this sandbox -- better to rely on the soft prompt
+# instruction alone (as before this session) than risk re-introducing
+# the same problem with a different guessed threshold.
+
+
+_http_client: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    """One shared client (connection pooling / keep-alive) instead of a
+    new TCP+TLS handshake per LLM call. Per-request timeouts are passed
+    on each post. Closed at shutdown via close_http_client()."""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(timeout=settings.llm_chat_timeout_seconds)
+    return _http_client
+
+
+async def close_http_client() -> None:
+    global _http_client
+    if _http_client is not None and not _http_client.is_closed:
+        await _http_client.aclose()
+    _http_client = None
+
 
 async def _post_with_retry(
     client: httpx.AsyncClient,
@@ -51,6 +85,7 @@ async def _post_with_retry(
     headers: dict | None = None,
     retries: int = 3,
     base_delay: float = 2.0,
+    timeout: float | None = None,
 ) -> httpx.Response:
     """POSTs with backoff retries for transient server-side overload or
     network hiccups, so a momentary "high demand, try again" from the
@@ -69,7 +104,10 @@ async def _post_with_retry(
     last_exc: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            resp = await client.post(url, headers=headers, json=json_payload)
+            resp = await client.post(
+                url, headers=headers, json=json_payload,
+                **({} if timeout is None else {"timeout": timeout}),
+            )
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
             last_exc = exc
             if attempt < retries:
@@ -87,19 +125,36 @@ async def _post_with_retry(
     raise last_exc  # pragma: no cover -- loop always returns or raises above
 
 
+def _sanitize_url_for_log(url: httpx.URL | str) -> str:
+    """Strips query params from a provider URL before it goes anywhere
+    near a log line or exception message. Gemini's REST API takes its
+    API key as a `?key=...` query param (see GeminiProvider below), so
+    the untouched URL is a secret, not just an identifier -- this must
+    be applied everywhere a provider URL could end up in text a human
+    reads later (logs, error details), not only in the one place it was
+    first noticed."""
+    return str(url).split("?", 1)[0]
+
+
 def _raise_for_status_with_body(resp: httpx.Response) -> None:
     """Like resp.raise_for_status(), but includes the response body in the
     exception message -- the provider's actual error text (e.g. Google's
     "model not found" or OpenAI's schema-validation message) is what
     actually explains a 4xx/5xx, and the plain httpx exception drops it,
     which turns every such failure into a guessing game from the status
-    code alone."""
+    code alone.
+
+    The URL is sanitized (see _sanitize_url_for_log) before going into
+    this message, since it's the one piece of this exception that is
+    guaranteed to contain a secret (the Gemini API key) rather than just
+    possibly-sensitive content."""
     if resp.is_success:
         return
     body_preview = resp.text[:2000]
     kind = "Client" if resp.is_client_error else "Server"
     raise httpx.HTTPStatusError(
-        f"{kind} error '{resp.status_code}' for url '{resp.url}' -- body: {body_preview}",
+        f"{kind} error '{resp.status_code}' for url '{_sanitize_url_for_log(resp.url)}' -- "
+        f"body: {body_preview}",
         request=resp.request,
         response=resp,
     )
@@ -180,8 +235,9 @@ class GeminiProvider(LLMProvider):
             raise ProviderNotConfigured("gemini_api_key not set")
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-3.6-flash:generateContent?key={settings.gemini_api_key}"
+            f"{settings.gemini_model}:generateContent"
         )
+        headers = {"x-goog-api-key": settings.gemini_api_key}
         contents = [_gemini_turn(turn) for turn in (history or [])]
         contents.append({"role": "user", "parts": [{"text": question}]})
         payload = {
@@ -194,10 +250,9 @@ class GeminiProvider(LLMProvider):
             history=json.dumps(history or [], indent=2),
             question=question,
         )
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await _post_with_retry(client, url, payload)
-            _raise_for_status_with_body(resp)
-            data = resp.json()
+        resp = await _post_with_retry(_get_client(), url, payload, headers=headers, timeout=settings.llm_chat_timeout_seconds)
+        _raise_for_status_with_body(resp)
+        data = resp.json()
         return data["candidates"][0]["content"]["parts"][0]["text"]
 
     async def generate_structured(self, context: str, question: str, schema: dict) -> dict[str, Any]:
@@ -205,8 +260,9 @@ class GeminiProvider(LLMProvider):
             raise ProviderNotConfigured("gemini_api_key not set")
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-3.6-flash:generateContent?key={settings.gemini_api_key}"
+            f"{settings.gemini_model}:generateContent"
         )
+        headers = {"x-goog-api-key": settings.gemini_api_key}
         payload = {
             "contents": [{"parts": [{"text": f"{context}\n\nUser: {question}"}]}],
             "generationConfig": {
@@ -219,10 +275,9 @@ class GeminiProvider(LLMProvider):
             prompt=f"{context}\n\nUser: {question}",
             response_schema=json.dumps(_strip_unsupported_gemini_schema_keys(schema), indent=2),
         )
-        async with httpx.AsyncClient(timeout=45) as client:
-            resp = await _post_with_retry(client, url, payload)
-            _raise_for_status_with_body(resp)
-            data = resp.json()
+        resp = await _post_with_retry(_get_client(), url, payload, headers=headers, timeout=settings.llm_structured_timeout_seconds)
+        _raise_for_status_with_body(resp)
+        data = resp.json()
         text = data["candidates"][0]["content"]["parts"][0]["text"]
         _log_prompt("gemini", "structured_response", raw_response_text=text)
         return json.loads(text)
@@ -245,12 +300,11 @@ class GPTProvider(LLMProvider):
             for turn in (history or [])
         )
         messages.append({"role": "user", "content": question})
-        payload = {"model": "gpt-4o-mini", "messages": messages}
+        payload = {"model": settings.openai_model, "messages": messages}
         _log_prompt("gpt", "chat", messages=json.dumps(messages, indent=2))
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await _post_with_retry(client, url, payload, headers=headers)
-            _raise_for_status_with_body(resp)
-            data = resp.json()
+        resp = await _post_with_retry(_get_client(), url, payload, headers=headers, timeout=settings.llm_chat_timeout_seconds)
+        _raise_for_status_with_body(resp)
+        data = resp.json()
         return data["choices"][0]["message"]["content"]
 
     async def generate_structured(self, context: str, question: str, schema: dict) -> dict[str, Any]:
@@ -259,7 +313,7 @@ class GPTProvider(LLMProvider):
         url = "https://api.openai.com/v1/chat/completions"
         headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
         payload = {
-            "model": "gpt-4o-mini",
+            "model": settings.openai_model,
             "messages": [
                 {"role": "system", "content": context},
                 {"role": "user", "content": question},
@@ -275,10 +329,9 @@ class GPTProvider(LLMProvider):
             question=question,
             response_schema=json.dumps(schema, indent=2),
         )
-        async with httpx.AsyncClient(timeout=45) as client:
-            resp = await _post_with_retry(client, url, payload, headers=headers)
-            _raise_for_status_with_body(resp)
-            data = resp.json()
+        resp = await _post_with_retry(_get_client(), url, payload, headers=headers, timeout=settings.llm_structured_timeout_seconds)
+        _raise_for_status_with_body(resp)
+        data = resp.json()
         text = data["choices"][0]["message"]["content"]
         _log_prompt("gpt", "structured_response", raw_response_text=text)
         return json.loads(text)
@@ -323,7 +376,7 @@ async def generate_structured_answer(
             raise exc
 
 
-def _summarize_provider_error(exc: Exception) -> str:
+def summarize_provider_error(exc: Exception) -> str:
     """Turns a raw provider exception into a short, user-facing reason.
     Without this, a caller whose providers all failed only ever saw a
     generic "no provider available" -- the actual cause (rate-limited?
@@ -375,8 +428,13 @@ async def generate_structured_from_all(
     for name, result in zip(names, results):
         if isinstance(result, Exception):
             if not isinstance(result, ProviderNotConfigured):
-                logger.warning("generate_structured_from_all: %s failed: %s", name, result)
-            errors[name] = _summarize_provider_error(result)
+                # Sanitized reason only -- never the raw exception, which
+                # for an HTTPStatusError includes the provider's raw
+                # response body and could echo back request content.
+                logger.warning(
+                    "generate_structured_from_all: %s failed (%s)", name, summarize_provider_error(result)
+                )
+            errors[name] = summarize_provider_error(result)
             continue
         out[name] = result
     return out, errors

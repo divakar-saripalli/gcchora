@@ -23,13 +23,19 @@ const kLifeEventCategories = <String, EventCategoryInfo>{
   'UNDERGRAD_GRADUATION': EventCategoryInfo('Undergraduate degree', false),
   'POSTGRADUATE': EventCategoryInfo("Postgraduate / master's degree", true),
   'PHD': EventCategoryInfo('PhD / doctorate', false),
-  'MARRIAGE': EventCategoryInfo('Marriage', false),
+  'MARRIAGE': EventCategoryInfo('Marriage', true),
+  'DIVORCE': EventCategoryInfo('Divorce / separation', true),
   'FIRST_CHILD': EventCategoryInfo('First child', false),
   'KIDS': EventCategoryInfo('Child born (later)', true),
   'CAREER_DISRUPTION': EventCategoryInfo('Career disruption / job loss', true),
   'PROPERTY_PURCHASE': EventCategoryInfo('Bought property', true),
   'FOREIGN_TRAVEL': EventCategoryInfo('Moved abroad / foreign travel', true),
   'MAJOR_ACCIDENT': EventCategoryInfo('Major accident or illness', true),
+  // Correlated against the SPOUSE's chart too when spouse birth
+  // details are on file (see app/routers/rectify.py's
+  // _build_spouse_line and app/routers/chat.py's spouse_line).
+  'PARENT_HEALTH': EventCategoryInfo("Parent's health concern", true),
+  'INLAW_HEALTH': EventCategoryInfo("In-law's health concern", true),
   'BUSINESS_LAUNCH': EventCategoryInfo('Started a business', true),
   'JOB_PROMOTION': EventCategoryInfo('Job promotion', true),
   'OTHER': EventCategoryInfo('Other (describe below)', true),
@@ -78,6 +84,41 @@ class _LifeEventsScreenState extends State<LifeEventsScreen> {
     ));
     if (!ok && mounted && data.errorMessage != null) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(data.errorMessage!)));
+    }
+  }
+
+  Future<void> _confirmResetFollowupAnswers(BuildContext context) async {
+    final data = context.read<AppDataProvider>();
+    final count = data.events.where((e) => e.isFromFollowUpAnswer).length;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Reset follow-up answers?'),
+        content: Text(
+          'This removes all $count answer${count == 1 ? '' : 's'} you gave to calibration '
+          "follow-up questions, so you can re-answer them fresh. Your other manually-added "
+          'life events are not affected. This does not undo your current calibration result '
+          'by itself -- run calibration again afterward once you\'re ready to re-answer.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Reset them'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+
+    final deletedCount = await data.deleteFollowupAnswers();
+    if (!context.mounted) return;
+    if (deletedCount == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(data.errorMessage ?? 'Could not reset follow-up answers.')));
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Removed $deletedCount answer${deletedCount == 1 ? '' : 's'}.')));
     }
   }
 
@@ -300,6 +341,18 @@ class _LifeEventsScreenState extends State<LifeEventsScreen> {
                 style: const TextStyle(color: Colors.grey),
               ),
             ),
+          if (data.events.any((e) => e.isFromFollowUpAnswer))
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: data.isBusy ? null : () => _confirmResetFollowupAnswers(context),
+                  icon: const Icon(Icons.restart_alt),
+                  label: const Text('Reset follow-up answers'),
+                ),
+              ),
+            ),
           const SizedBox(height: 24),
           if (data.events.isNotEmpty) ...[
             Text('Recorded (${data.events.length})', style: Theme.of(context).textTheme.titleMedium),
@@ -331,6 +384,11 @@ class _LifeEventsScreenState extends State<LifeEventsScreen> {
                           final hasExactDate = e.exactDate != null && e.exactDate!.isNotEmpty;
                           final subtitleParts = <String>[
                             if (!hasExactDate && (e.timeFrameHint ?? '').isNotEmpty) 'Around: ${e.timeFrameHint}',
+                            // Show the actual question this answered,
+                            // when known, so the notes below read as a
+                            // direct answer to it rather than a stray
+                            // comment with no context.
+                            if ((e.questionText ?? '').isNotEmpty) 'Q: ${e.questionText}',
                             if (e.notes != null && e.notes!.isNotEmpty) e.notes!,
                           ];
                           return ListTile(

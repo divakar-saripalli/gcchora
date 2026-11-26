@@ -12,7 +12,24 @@ class AuthProvider extends ChangeNotifier {
   final PushService push;
   final AuthService authService = AuthService();
 
-  AuthProvider(this.api, this.push);
+  AuthProvider(this.api, this.push) {
+    api.onUnauthorized = _handleSessionExpired;
+  }
+
+  /// Set by main.dart: takes the user back to the login screen.
+  VoidCallback? onSessionExpired;
+
+  /// The server said our token is no longer valid while we were signed in.
+  void _handleSessionExpired() {
+    if (status != AuthStatus.signedIn) return; // restore/login handle their own 401s
+    api.setToken(null);
+    currentUser = null;
+    status = AuthStatus.signedOut;
+    errorMessage = 'Your session expired. Please sign in again.';
+    authService.clearSession();
+    notifyListeners();
+    onSessionExpired?.call();
+  }
 
   AuthStatus status = AuthStatus.unknown;
   AppUser? currentUser;
@@ -37,9 +54,19 @@ class AuthProvider extends ChangeNotifier {
       // permission prompt it may trigger) should never delay getting the
       // user past the splash screen.
       push.registerForSignedInUser();
+    } on ApiException catch (e) {
+      if (e.statusCode == 401 || e.statusCode == 403) {
+        // The token is genuinely no longer valid (expired or revoked).
+        await authService.clearSession();
+        api.setToken(null);
+      } else {
+        errorMessage = 'Could not verify your session. Please try again.';
+      }
+      status = AuthStatus.signedOut;
     } catch (_) {
-      await authService.clearSession();
-      api.setToken(null);
+      // Network failure/timeout: don't throw away a possibly-valid saved
+      // session just because the server was unreachable right now.
+      errorMessage = 'Could not reach the server. Check your connection and try again.';
       status = AuthStatus.signedOut;
     }
     notifyListeners();

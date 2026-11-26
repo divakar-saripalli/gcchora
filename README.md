@@ -68,3 +68,43 @@ smoke test to confirm the dasha/rectification math executes.
   server-side verification (e.g. AdMob rewarded ads SSV) before relying on it.
 - **Chinese astrology / palmistry engines**: not built yet; `app/engines/`
   is structured so they can be added alongside `vedic.py` per the design doc.
+
+### What belongs in git, and what doesn't
+
+Safe to commit -- configuration that ships inside the mobile app anyway
+and is not a secret by design:
+
+- `mobile_app/android/app/google-services.json` (Firebase client config)
+- the Google OAuth *client ID* in `mobile_app/lib/config.dart`
+
+Never commit -- anything that grants access on its own. All of these are
+in `.gitignore`; keep it that way and add new ones there first:
+
+- `.env` (database URI, JWT secret, LLM API keys, `FIELD_ENCRYPTION_KEY`)
+- `firebase-service-account.json` and any `*firebase-adminsdk*.json`
+- `atlas-credentials.env`
+- `mobile_app/client_secret_*.json`, `mobile_app/Secrets/`
+
+`FIELD_ENCRYPTION_KEY` needs its own backup outside this machine: if it
+is lost, the encrypted fields (birth times, coordinates, event notes,
+chat messages) cannot be recovered.
+
+### Running somewhere other than your own machine
+
+Set `ENVIRONMENT=prod` (or `staging`). The app then refuses to start
+unless `JWT_SECRET` is a real random value, `FIELD_ENCRYPTION_KEY` is
+set, and `ALLOW_TEST_AD_BYPASS` / `LOG_LLM_PROMPTS` are off. Put it
+behind HTTPS (a reverse proxy such as Caddy or nginx terminating TLS in
+front of uvicorn) and build the app with
+`--dart-define=API_BASE_URL=https://...` so nothing travels as plain
+http.
+
+### Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The suite uses an in-memory stand-in for MongoDB and never calls an LLM
+provider, so it needs no network, database or API keys.

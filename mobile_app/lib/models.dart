@@ -61,6 +61,12 @@ class DisambiguationAnswer {
   final String? exactDate; // optional -- only if the user actually knows it
   final String? timeFrameHint; // echoed back from the question that was answered
   final String? notes;
+  // Echoed back from the question that was answered, so the stored
+  // event -- and every later prompt that reads it back -- carries the
+  // actual question asked, not just a category slug. Lets the model
+  // treat `notes` as a direct answer to a specific named question
+  // instead of a vague aside.
+  final String? questionText;
 
   DisambiguationAnswer({
     required this.category,
@@ -68,6 +74,7 @@ class DisambiguationAnswer {
     this.exactDate,
     this.timeFrameHint,
     this.notes,
+    this.questionText,
   });
 
   Map<String, dynamic> toJson() => {
@@ -76,6 +83,7 @@ class DisambiguationAnswer {
         if (exactDate != null) 'exact_date': exactDate,
         if (timeFrameHint != null && timeFrameHint!.isNotEmpty) 'time_frame_hint': timeFrameHint,
         if (notes != null && notes!.isNotEmpty) 'notes': notes,
+        if (questionText != null && questionText!.isNotEmpty) 'question_text': questionText,
       };
 }
 
@@ -102,6 +110,15 @@ class CalibrationInfo {
   /// under the birth date/time) -- the raw `status` value is a backend
   /// enum string ("pending_review", "uncalibrated") meant for logic, not
   /// for showing to the user verbatim.
+  /// "Corrected 10:04:00 (Lahiri ayanamsa)" once the profile is LOCKED,
+  /// or null otherwise (an unlocked estimate isn't shown as final).
+  String? get correctedSummary {
+    if (status != 'locked' || rectifiedBirthTime24h == null) return null;
+    final ayanamsa = chosenAyanamsa;
+    return 'Corrected $rectifiedBirthTime24h'
+        '${ayanamsa == null ? '' : ' ($ayanamsa ayanamsa)'}';
+  }
+
   String get displayLabel {
     switch (status) {
       case 'uncalibrated':
@@ -135,11 +152,27 @@ class CalibrationInfo {
 class BirthProfile {
   final String id;
   final String label;
+  // self | spouse | child | parent | other (older profiles read as self).
+  final String relation;
   final String birthDate;
   final String birthTime24h;
   final GeoCoordinates coordinates;
   final int birthTimeUncertaintyMinutes;
   final CalibrationInfo calibration;
+  final bool isMarried;
+  // All three null unless isMarried AND they've actually been filled
+  // in -- used for cross-chart ("synastry") reasoning in rectification
+  // and chat (see app/routers/rectify.py's _build_spouse_line and
+  // app/routers/chat.py's spouse_line).
+  final String? spouseBirthDate;
+  final String? spouseBirthTime24h;
+  final GeoCoordinates? spouseCoordinates;
+  // True when isMarried but one or more of the three spouse_* fields
+  // above is still missing -- including for a profile created before
+  // this feature existed at all (backward compatibility). The UI uses
+  // this to prompt for spouse details rather than silently doing
+  // without them.
+  final bool needsSpouseDetails;
 
   BirthProfile({
     required this.id,
@@ -149,6 +182,12 @@ class BirthProfile {
     required this.coordinates,
     required this.birthTimeUncertaintyMinutes,
     required this.calibration,
+    this.relation = 'self',
+    this.isMarried = false,
+    this.spouseBirthDate,
+    this.spouseBirthTime24h,
+    this.spouseCoordinates,
+    this.needsSpouseDetails = false,
   });
 
   /// Handles both shapes the backend returns for a profile:
@@ -159,16 +198,23 @@ class BirthProfile {
     final CalibrationInfo calibration = json.containsKey('calibration')
         ? CalibrationInfo.fromJson(json['calibration'] as Map<String, dynamic>?)
         : CalibrationInfo(status: json['calibration_status'] as String? ?? 'uncalibrated');
+    final spouseCoordsJson = json['spouse_geographic_coordinates'] as Map<String, dynamic>?;
 
     return BirthProfile(
       id: (json['id'] ?? json['_id']) as String,
       label: json['label'] as String? ?? 'Self',
+      relation: json['relation'] as String? ?? 'self',
       birthDate: json['birth_date'] as String,
       birthTime24h: json['birth_time_24h'] as String,
       coordinates: GeoCoordinates.fromJson(coordsJson),
       birthTimeUncertaintyMinutes:
           (json['birth_time_uncertainty_minutes'] as num?)?.toInt() ?? 30,
       calibration: calibration,
+      isMarried: json['is_married'] as bool? ?? false,
+      spouseBirthDate: json['spouse_birth_date'] as String?,
+      spouseBirthTime24h: json['spouse_birth_time_24h'] as String?,
+      spouseCoordinates: spouseCoordsJson != null ? GeoCoordinates.fromJson(spouseCoordsJson) : null,
+      needsSpouseDetails: json['needs_spouse_details'] as bool? ?? false,
     );
   }
 }
@@ -186,6 +232,10 @@ class LifeEvent {
   // e.g. "suggested_followup_answer" when this came from answering a
   // rectify follow-up question instead of the "Add an event" form.
   final String? source;
+  // The exact follow-up question this event answered, when it came from
+  // one -- lets the life events list show the question alongside the
+  // user's answer (in [notes]) instead of just a category slug.
+  final String? questionText;
 
   LifeEvent({
     this.id,
@@ -195,6 +245,7 @@ class LifeEvent {
     this.notes,
     this.timeFrameHint,
     this.source,
+    this.questionText,
   });
 
   bool get isFromFollowUpAnswer => source == 'suggested_followup_answer';
@@ -207,6 +258,7 @@ class LifeEvent {
     String? notes,
     String? timeFrameHint,
     String? source,
+    String? questionText,
   }) =>
       LifeEvent(
         id: id ?? this.id,
@@ -216,6 +268,7 @@ class LifeEvent {
         notes: notes ?? this.notes,
         timeFrameHint: timeFrameHint ?? this.timeFrameHint,
         source: source ?? this.source,
+        questionText: questionText ?? this.questionText,
       );
 
   factory LifeEvent.fromJson(Map<String, dynamic> json) => LifeEvent(
@@ -226,6 +279,7 @@ class LifeEvent {
         notes: json['notes'] as String?,
         timeFrameHint: json['time_frame_hint'] as String?,
         source: json['source'] as String?,
+        questionText: json['question_text'] as String?,
       );
 
   Map<String, dynamic> toJson() => {
@@ -240,17 +294,24 @@ class AyanamsaEstimate {
   final String ayanamsa;
   final String rectifiedBirthTime24h;
   final double confidenceScore;
+  // Short explanation of which specific life events support THIS
+  // ayanamsa/time combination -- distinct from RectifyCandidate.reasoning,
+  // which only ever covers the provider's single overall top pick. Empty
+  // for older cached results from before this field existed.
+  final String reasoning;
 
   AyanamsaEstimate({
     required this.ayanamsa,
     required this.rectifiedBirthTime24h,
     required this.confidenceScore,
+    this.reasoning = '',
   });
 
   factory AyanamsaEstimate.fromJson(Map<String, dynamic> json) => AyanamsaEstimate(
         ayanamsa: json['ayanamsa'] as String,
         rectifiedBirthTime24h: json['rectified_birth_time_24h'] as String,
         confidenceScore: (json['confidence_score'] as num).toDouble(),
+        reasoning: json['reasoning'] as String? ?? '',
       );
 }
 

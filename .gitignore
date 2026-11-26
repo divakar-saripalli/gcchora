@@ -14,3 +14,8 @@ mobile_app/Secrets/
 mobile_app/client_secret_*.json
 firebase-service-account.json
 *firebase-adminsdk*.json
+
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/

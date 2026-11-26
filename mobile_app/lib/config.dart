@@ -1,11 +1,21 @@
 class AppConfig {
-  // Android EMULATOR maps 10.0.2.2 to the host machine's localhost, so this
-  // reaches `uvicorn main:app --reload` (default port 8000) running on your
-  // Windows machine. If you switch to a physical phone instead of the
-  // emulator, 10.0.2.2 will NOT work -- change this to your PC's LAN IP
-  // instead, e.g. http://192.168.1.23:8000 (find it with `ipconfig`), and
-  // make sure the phone is on the same Wi-Fi network.
-  static const String apiBaseUrl = 'http://10.0.2.2:8000';
+  // Android EMULATOR maps 10.0.2.2 to the host machine's localhost, so the
+  // default below reaches `uvicorn main:app --reload` (port 8000) on your
+  // Windows machine.
+  //
+  // Physical phone over USB (simplest): run `adb reverse tcp:8000 tcp:8000`
+  // and build with --dart-define=API_BASE_URL=http://localhost:8000 --
+  // localhost is the one plain-http address debug builds allow besides the
+  // emulator's. A bare LAN IP (http://192.168.x.x) is BLOCKED by the debug
+  // network-security config on purpose; use the USB route above, or an
+  // https:// address (e.g. a tunnel) instead.
+  //
+  //   flutter run --dart-define=API_BASE_URL=http://localhost:8000
+  //   flutter build apk --dart-define=API_BASE_URL=https://api.example.com
+  // Anything that isn't your own machine should be https:// -- plain http
+  // sends sign-in tokens, birth details and chat messages unencrypted.
+  static const String apiBaseUrl =
+      String.fromEnvironment('API_BASE_URL', defaultValue: 'http://10.0.2.2:8000');
 
   // The Web/server OAuth client ID from Google Cloud Console. This MUST be
   // the same value as GOOGLE_CLIENT_ID in the backend's .env -- that's the

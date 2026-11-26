@@ -12,6 +12,7 @@ logs and no-ops instead of failing, same pattern as
 app.config.allow_test_ad_bypass. This matters because nothing else in
 the app should break just because push hasn't been set up yet.
 """
+import asyncio
 import logging
 
 from app.config import settings
@@ -101,9 +102,9 @@ async def send_push(user_id: str, title: str, body: str, data: dict[str, str] | 
 
     from firebase_admin import messaging
 
-    sent = 0
-    stale_tokens = []
-    for token in tokens:
+    def _send_one(token: str) -> str:
+        """Blocking FCM call -- runs in a worker thread so it can't stall
+        the event loop. Returns "sent", "stale" or "failed"."""
         message = messaging.Message(
             notification=messaging.Notification(title=title, body=body),
             data=data or {},
@@ -111,14 +112,17 @@ async def send_push(user_id: str, title: str, body: str, data: dict[str, str] | 
         )
         try:
             messaging.send(message, app=app)
-            sent += 1
+            return "sent"
         except messaging.UnregisteredError:
-            # The app was uninstalled, or this token was replaced by a
-            # newer one from the same device -- FCM tells us it's dead,
-            # so stop storing and trying it.
-            stale_tokens.append(token)
-        except Exception:
-            logger.exception("Failed to send push to a device token for user %s (token kept for retry).", user_id)
+            # App uninstalled or token replaced -- FCM says it's dead.
+            return "stale"
+        except Exception as exc:
+            logger.warning("Failed to send push to a device token (%s); token kept for retry.", type(exc).__name__)
+            return "failed"
+
+    results = await asyncio.gather(*(asyncio.to_thread(_send_one, t) for t in tokens))
+    sent = results.count("sent")
+    stale_tokens = [t for t, r in zip(tokens, results) if r == "stale"]
 
     if stale_tokens:
         await device_tokens_collection().delete_many({"_id": {"$in": stale_tokens}})
