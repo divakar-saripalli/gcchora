@@ -12,12 +12,13 @@ import hashlib
 import hmac
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.config import settings
 from app.db import ad_reward_events_collection
 from app.models import AdRewardCallback
 from app.quota import credit_ad_unlock
+from app.security import get_current_user
 
 router = APIRouter(prefix="/ads", tags=["ads"])
 
@@ -50,3 +51,21 @@ async def reward_callback(payload: AdRewardCallback):
     })
     await credit_ad_unlock(payload.user_id)
     return {"status": "credited"}
+
+
+@router.post("/test-credit")
+async def test_credit(user: dict = Depends(get_current_user)):
+    """Dev/QA-only stand-in for the real rewarded-ad flow above, which the
+    app doesn't have a real ad SDK wired up to call yet. Lets a signed-in
+    tester grant themselves one ad-unlock credit directly, with no ad
+    network or signature involved. Only reachable when
+    ALLOW_TEST_AD_BYPASS=true is set server-side -- off by default, and
+    entirely separate from /reward-callback's real verification, which
+    this does not touch or weaken."""
+    if not settings.allow_test_ad_bypass:
+        raise HTTPException(
+            status_code=403,
+            detail="Ad bypass is disabled. Set ALLOW_TEST_AD_BYPASS=true in the backend's .env to enable it for testing.",
+        )
+    await credit_ad_unlock(user["_id"])
+    return {"status": "credited", "note": "test bypass -- no real ad was watched"}

@@ -1,9 +1,27 @@
 {
-  "GRADUATION": [
+  "SCHOOL_GRADUATION": [
     "Mercury",
     "Jupiter",
     "Sun",
     "Moon"
+  ],
+  "UNDERGRAD_GRADUATION": [
+    "Mercury",
+    "Jupiter",
+    "Sun",
+    "Moon"
+  ],
+  "POSTGRADUATE": [
+    "Mercury",
+    "Jupiter",
+    "Saturn",
+    "Sun"
+  ],
+  "PHD": [
+    "Saturn",
+    "Mercury",
+    "Jupiter",
+    "Ketu"
   ],
   "MARRIAGE": [
     "Venus",
@@ -58,6 +76,12 @@
   "JOB_PROMOTION": [
     "Sun",
     "Mars",
+    "Jupiter",
+    "Saturn"
+  ],
+  "OTHER": [
+    "Sun",
+    "Moon",
     "Jupiter",
     "Saturn"
   ]

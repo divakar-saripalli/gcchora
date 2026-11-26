@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "352066058265",
+    "project_id": "my-pda-f9b1e",
+    "storage_bucket": "my-pda-f9b1e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:352066058265:android:896bceb038ee7004121288",
+        "android_client_info": {
+          "package_name": "com.googlehora.mobile_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCAdA49whk_FMoBVuWq9ecsGblYFDFcKy0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
